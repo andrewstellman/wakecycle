@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+harness_runs/
+dist/
+build/
+*.egg-info/
+node_modules/
+*.tgz
+.DS_Store
