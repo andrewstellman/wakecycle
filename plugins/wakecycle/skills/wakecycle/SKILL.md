@@ -151,3 +151,51 @@ double-runs:
 The two silent wakeup-drops observed in the wild (2026-06-11) are exactly
 why the printed floor command exists — print it whenever you reschedule so
 the operator can always recover without re-finding this prompt.
+
+## In-context mode (dispatch-to-self, FR-46..49)
+
+In-context is the **third dispatch mode** (alongside subagent and shell),
+orthogonal to cadence: between ticks you MAY do a task yourself, in your own
+context. It is enabled by an `instruction_folder` setting at bootstrap; its
+presence selects this superset mode (harness mode + in-context). Harness mode
+keeps working exactly as above; in-context adds doing work yourself.
+
+**Streaming instruction queue (FR-47).** Watch the `instruction_folder`. Each
+instruction is a file named `NNN-...` (zero-padded numeric prefix). An
+instruction is *processed* when an output file with the same `NNN` stem exists
+in the outputs folder. Process the **lowest-numbered instruction with no
+matching output**, write that output, then look again; idle when the queue is
+empty. The selection is deterministic — `bin/incontext.py` computes it
+(`incontext.py next <instructions> <outputs> [--stop-file F]`), so you never
+have to eyeball it. A `STOP` file halts the queue, **including mid-queue**: while
+STOP is present you pick nothing (FR-10 read-only).
+
+**Single-turn, sequential (C-6).** The agent turn is single-threaded, so
+in-context work and a harness tick never overlap. While you do in-context work,
+monitoring **pauses** — heartbeat reads, stall detection, dispatch, and status
+updates wait until between tasks. Background processes/subagents keep running
+and heartbeating throughout; the next tick absorbs whatever changed (the engine
+tolerates the irregular spacing — same property as the wall-clock-jump guard).
+When you resume ticking, note the gap in the status table (FR-49): *"monitoring
+paused HH:MM–HH:MM for in-context work; N background changes since last poll."*
+
+**Cross-axis coupling — state it, don't imply otherwise.** The in-context
+*tasks themselves* need a live agent, so they ride on **rung-1** cadence.
+Background workers the same run watches can be driven by any rung. The
+deterministic floor (ticker/cron) rescues only the background/harness portion.
+
+**ERR discipline is mandatory here (FR-48).** In-context work fills your
+context and is compaction-prone (unlike bounded-context harness mode).
+**Externalize** progress to disk as you go (write the output file; don't hold
+results only in memory), **recognize** loss on resume, and **rehydrate** from
+disk: on resume, re-read `harness_status.json`, the instruction folder, and the
+outputs to re-establish exact state without trusting memory. Disk is the ERR
+substrate.
+
+**Honesty — read this (C-7 / FR-50 / §8).** In-context mode **does not fix
+Class-C** loop drops. There is **no auto-recovery of the in-context queue**: if
+your turn silently dies mid-burst, the in-context tasks are not auto-relaunched
+— they require operator re-bootstrap. In-context mode is a convenience/
+unification superset, **not the unattended-reliability path** — that is the
+deterministic ticker/cron rungs. Steer anyone who needs reliable unattended
+runs to those rungs.

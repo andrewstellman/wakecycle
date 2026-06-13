@@ -251,6 +251,27 @@ Ask, in order:
 The ticker runs **`shell` entries only** — a `subagent` entry it encounters
 is reported and skipped with the rung-1 instruction.
 
+## In-context mode (dispatch-to-self)
+
+A third dispatch option (FR-46), beyond subagent and shell: the orchestrator can
+do tasks **itself**, in its own context, between ticks. Enable it with an
+`instruction_folder` setting at bootstrap — the agent then watches that folder
+and processes the **lowest-numbered `NNN-` instruction with no matching output**
+(a streaming queue, distinct from the plan's fixed batch), writes the output,
+and idles when the queue is empty; a `STOP` file halts it, including mid-queue.
+It's a superset that keeps every harness feature; while the agent does
+in-context work, background monitoring pauses and resumes between tasks (the
+turn is single-threaded), and the next tick absorbs whatever the background
+workers did.
+
+**Honesty (C-7) — important.** In-context mode **does not fix Class-C** loop
+drops, has **no auto-recovery** of the in-context queue (a silently-dropped turn
+needs operator re-bootstrap), and is **rung-1 only**. It is a convenience/
+unification superset, **not the unattended-reliability path**. For reliable
+unattended runs, use the deterministic ticker/cron rungs — the floor rescues
+only the background/harness portion of an in-context session, never the
+in-context tasks themselves.
+
 ## Running and reading the status table
 
 Rung 1: paste the bootstrap, watch the table each tick. Rung 3:

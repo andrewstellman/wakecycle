@@ -144,6 +144,18 @@ FR-25)
 Rungs 2–4 require `dispatch_mode: "shell"` entries (an externally-ticked
 context can't launch in-session subagents — C-2).
 
+**In-context mode (a third dispatch option, FR-46).** Beyond dispatching
+subagents/shell workers, the orchestrator can also do tasks *itself*, in its
+own context, between ticks — enabled by an `instruction_folder` setting, which
+turns the agent into a streaming-queue worker (it processes the
+lowest-numbered instruction with no matching output). It is a convenience
+superset that keeps every harness feature. **Honesty (C-7):** in-context mode
+**does not fix Class-C** loop drops and has no auto-recovery of its own queue —
+it is **rung-1 only** and is **not the unattended-reliability path**. If you
+need reliable *unattended* runs, use the deterministic ticker/cron rungs (2–4),
+which are immune to the agent-loop drop; the in-context/agent rung is the
+interactive/convenient mode, backed by the safety tick.
+
 ---
 
 ## Host support — what's verified vs designed (honest)
