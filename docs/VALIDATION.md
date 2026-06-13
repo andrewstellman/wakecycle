@@ -46,9 +46,45 @@
 | V-12 | 2026-06-12 | WORKER (macOS) | **PASS** | **A-5 dead-process fast-fail:** killed live worker PID 50735 → next `--once` tick marked it FAILED fast ("shell worker process 50735 exited without a terminal heartbeat"), not waiting out the stall threshold. **Time-based STALLED:** a worker verified still ALIVE (`kill -0`) with heartbeat aged past `stall_threshold_minutes:2` (advanced via the `WAKECYCLE_NOW` test-clock, not a 3-min real wait) → `stalled`; A-5 correctly did NOT fast-fail the live PID. Run-dirs `20260613T003434Z` (kill), `20260613T003451Z` (stall). |
 | V-13 | 2026-06-12 | WORKER (macOS) | **PASS** | STOP tick fully read-only ("STOP - halting", cycle 1→1 and state unchanged); the detached orphan worker ran to its own COMPLETED terminal despite STOP (documented orphan semantics); deleting STOP + ticking reaped it → completed → DONE (resume, UC-3/UC-4 with real processes). Run-dir `20260613T003526Z`. |
 | V-9 | 2026-06-12 | WORKER (macOS) | **FINDING (not a clean pass — cron cell stays DESIGNED)** | cron FIRES on this Mac (1-min canary + diagnostic both fired on schedule) and CAN access `~/Documents` (cd+ls OK); cron-driven `--once` ticks advance the state machine unattended (cycle 0→2, dispatch+reap in the cron log); the **E1 lockfile skip is witnessed** (two concurrent `--once` → one ticks, one prints "another tick is already in progress; this tick skipped cleanly (E1)" + the FR-25 floor command); the ticker works under cron's bare env (`env -i` → DONE). **BUT** a worker spawned detached (`start_new_session`) by a cron `--once` tick does NOT survive the cron job's exit — launchd terminates the cron job's process group, killing the child (v9-b PID 53800 DEAD, zero progress heartbeat) → the run never reaches done unattended. Run-dirs `20260613T003733Z`, `20260613T004506Z`. **Crontab snapshot/restore clean** (was: no crontab; `crontab -l` → none after). |
+| V-9 (re-run) | 2026-06-12 | WORKER (macOS) | **PASS (finding resolved)** | After the instruction-016 double-fork detachment fix (`ticker._spawn_worker`), cron drove a fresh 2-job shell plan to `done:true` **fully unattended (no foreground process)** — both workers COMPLETED ('survived cron via double-fork'); the cron-spawned workers now reparent to init (PID 1) and survive the cron job's process-tree teardown. E1 overlapping-fire lockfile skip re-witnessed. Crontab snapshot/restored clean (was: none -> none). Unit pin: a worker spawned via the new path has PPID==1 and the claim lock carries its real PID (A-5); reverting to single-fork fails the pin. Run-dir `20260613T034557Z`. **-> README 'OS scheduler, cadence 2 - cron (macOS)' flipped DESIGNED -> VERIFIED.** |
 
 **V-9 finding — product implication (for v0.2 hardening, NOT a README claim):** the cadence-2 cron path needs the ticker to detach shell workers strongly enough to escape the cron job's process group (double-fork / `setsid` + `disown` / `nohup`, not `start_new_session=True` alone), OR the cron deployment must document that each worker has to be launched to fully escape launchd's job-group cleanup. The README "OS scheduler, cadence 2" cell remains **DESIGNED** until this is fixed and re-validated. (Like the Haiku launch-failure run, this finding is the matrix earning its keep.)
 
 **README host-table changes this run: NONE.** The only DESIGNED→VERIFIED candidate among the worker's rows was V-9 (cron), which did not cleanly pass. V-11/12/13 corroborate already-stated worker-contract/stall/STOP behaviors with real processes (the relevant cells were already VERIFIED); per the discipline, no cell wording was changed without a DESIGNED→VERIFIED flip behind it.
 
 *README table updates happen ONLY by citing a row above with evidence. Failures are findings, not embarrassments — log them with the same rigor (the Haiku launch-failure run improved the product more than the clean passes did).*
+
+---
+
+## Operator runbook — V-7/V-8 (Windows, no admin)
+
+*Operator confirmed Windows hardware available (2026-06-12). ~20 minutes. Capture terminal output as you go and paste it back to the orchestrator; the run-dirs are the evidence.*
+
+**Prerequisites (all user-level, no admin):** Python 3.10+ from python.org ("install for me only"; the `py` launcher) or the Microsoft Store build; `git` if present (otherwise download the repo ZIP from github.com/andrewstellman/wakecycle and unzip).
+
+**V-7a — ticker loop in PowerShell:**
+```powershell
+cd $env:USERPROFILE\Documents
+git clone https://github.com/andrewstellman/wakecycle    # or unzip the ZIP here
+cd wakecycle
+py -m unittest discover -s tests        # baseline: the suite on Windows (capture count)
+py bin\ticker.py <shell demo plan>      # the fast shell-dispatch plan; watch it to DONE
+```
+Watch for: workers spawning with PIDs, idle tick(s), staggered dispatch, clean DONE, table rendering without garbled characters.
+
+**V-7b — same plan, fresh run, in cmd.exe** (the cp1252 console is the load-bearing check — the table and all messages must render clean in BOTH shells).
+
+**V-7c — manual floor:** one `py bin\ticker.py --once <run-dir>` against a fresh run-dir; confirm one safe tick + the printed next-command floor message.
+
+**V-8 — path edges (same session):**
+1. Re-run with the run-dir under a spaced path (your Windows user dir is likely `C:\Users\<name with space>\...` already — confirm the run-dir path printed contains the space and everything still works).
+2. Point a run-dir at a path containing `OneDrive` (the real OneDrive Documents folder if redirected, or any folder named OneDrive) → the E4 warning must fire.
+
+**Record:** paste outputs to the orchestrator; rows + README flips happen with evidence cited (Windows ticker cell, E3/E4 edges).
+
+## Operator runbook — V-10 (safety tick, ~15 min, any time)
+
+1. Start a rung-1 run: fresh Claude Code session, paste the bootstrap with the subagent demo plan — **set `pool_size` ≥ entry count** so everything dispatches in tick 1 (a safety tick can't dispatch subagent entries; it can only reap/advance — C-2).
+2. In a second terminal, run a crude safety tick: `while sleep 120; do python3 bin/ticker.py --once <run-dir>; done` — observe cycle-only no-ops while the session lives.
+3. Mid-run (during the idle phase), **quit the Claude Code session**.
+4. Watch the safety-tick loop finish the run to DONE unattended. That's FR-26a verified end-to-end: kill the orchestrator, lose nothing.

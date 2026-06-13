@@ -158,7 +158,8 @@ trust a DESIGNED cell as if it were proven.
 | Foreground ticker, cadence 3 (no-admin floor), macOS | shell | **VERIFIED** | Live end-to-end demo in-repo, 2026-06-12: pool gating, real detached PIDs, idle tick, staggered dispatch on reap, clean DONE — independently reproduced |
 | Idempotency / idle-tick survival / STOP / resume | both | **VERIFIED** | Unit suite (mutation-verified) + spike passes; double-tick is cycle-only by construction |
 | Encoding safety (cp1252 / utf-8) | both | **VERIFIED** | AST sweep tests with mutation-verified pins |
-| OS scheduler, cadence 2 (cron / Task Scheduler / launchd) | shell | **DESIGNED** | `--once` is the cron target and unit-tested; no cross-host scheduled-run matrix yet |
+| OS scheduler, cadence 2 — **cron (macOS)** | shell | **VERIFIED** | cron drove a shell plan to `done` fully unattended (no foreground process), 2026-06-12, after the double-fork detachment fix that lets workers survive the cron job's process-tree teardown; E1 overlapping-fire lockfile skip witnessed; crontab snapshot/restored (VALIDATION V-9). |
+| OS scheduler, cadence 2 — Windows Task Scheduler / other hosts | shell | **DESIGNED** | `--once` is the cross-host schedule target and unit-tested; no Windows/other scheduled-run yet |
 | Windows / Linux, foreground ticker | shell | **DESIGNED** | Platform branches are stdlib + unit-tested (detach flags, PID liveness, lockfile); verified live on macOS only |
 | Codex / Copilot / Cursor CLIs as workers | shell | **DESIGNED** | `worker_cmd` is CLI-agnostic by design; per-host validation is v0.2 |
 
