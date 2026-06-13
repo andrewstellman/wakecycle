@@ -433,6 +433,74 @@ def run_name_of(run: dict) -> str:
     return run.get("_run_name", "")
 
 
+# --- control-file convention (FR-35) ----------------------------------------
+# A fixed, CLOSED set read at the run-dir root at the top of each tick. STOP is
+# handled by the not-stopped gate in tick() (so STOP stays fully read-only,
+# FR-10); the rest are dispatched here in a FIXED precedence. Only PAUSE/RESUME
+# have handlers this iteration; CANCEL/CADENCE/POOL/POLL-NOW are recognized
+# (reserved) and slot in as handlers in later iterations -- recognized-but-
+# unhandled, never crashing or mis-firing.
+_CONTROL_ORDER = ("CANCEL", "PAUSE", "RESUME", "CADENCE", "POOL", "POLL-NOW")
+_ONE_SHOT_CONTROLS = ("POLL-NOW", "CANCEL")      # consumed after firing once
+_STICKY_CONTROLS = ("PAUSE", "RESUME", "CADENCE", "POOL")  # persist to status
+_ALL_CONTROLS = ("STOP",) + _CONTROL_ORDER
+# a "control-style" filename: ALL-CAPS, no extension (the naming convention) --
+# used only to WARN on a stray look-alike (Postel), never to act on it.
+_CONTROL_NAME_RE = __import__("re").compile(r"^[A-Z][A-Z0-9-]*$")
+
+
+def _consume_control(run_dir: Path, name: str) -> None:
+    """Delete a control file after its value has been applied/persisted
+    (sticky) or it has fired (one-shot). Best-effort; never raises."""
+    try:
+        (run_dir / name).unlink()
+    except OSError:
+        pass
+
+
+def _ctl_pause(run_dir: Path, status: dict, warnings: list) -> None:
+    status["paused"] = True                      # sticky: persisted to status
+    _consume_control(run_dir, "PAUSE")
+
+
+def _ctl_resume(run_dir: Path, status: dict, warnings: list) -> None:
+    status["paused"] = False
+    _consume_control(run_dir, "RESUME")
+
+
+# The handler registry IS the extension point: Iterations 3-5 register CANCEL /
+# CADENCE / POOL / POLL-NOW here without touching tick(). A name in
+# _CONTROL_ORDER with no handler is recognized-but-unhandled (left on disk).
+_CONTROL_HANDLERS = {"PAUSE": _ctl_pause, "RESUME": _ctl_resume}
+
+
+def _apply_controls(run_dir: Path, status: dict) -> list:
+    """Read + apply the closed control set in fixed precedence. MUST be called
+    only inside the not-stopped path (the caller's STOP gate guarantees a STOP
+    tick reads/consumes nothing -- FR-10 read-only). Mutations to ``status``
+    are persisted by the caller's single atomic write. Returns warning strings
+    (Postel: unknown / unhandled never wedge the machine)."""
+    warnings: list = []
+    for name in _CONTROL_ORDER:                  # precedence order, explicit
+        if not (run_dir / name).is_file():
+            continue
+        handler = _CONTROL_HANDLERS.get(name)
+        if handler is None:
+            # reserved for a later iteration; recognize, don't act, don't crash
+            continue
+        handler(run_dir, status, warnings)
+    # Postel: a stray control-style file that isn't a recognized control is
+    # ignored with a warning -- never acted on, never wedges.
+    try:
+        for p in run_dir.iterdir():
+            if (p.is_file() and _CONTROL_NAME_RE.match(p.name)
+                    and p.name not in _ALL_CONTROLS):
+                warnings.append("unknown control file %r ignored" % p.name)
+    except OSError:
+        pass
+    return warnings
+
+
 def tick(run_dir: Path) -> dict:
     status = json.loads((run_dir / "harness_status.json").read_text(encoding="utf-8"))
     plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
@@ -464,9 +532,17 @@ def tick(run_dir: Path) -> dict:
         * _WALLCLOCK_JUMP_FACTOR)
 
     if not stop:
+        # Controls are read/consumed ONLY here (inside the not-stopped path),
+        # so a STOP tick stays fully read-only (FR-10). PAUSE/RESUME persist a
+        # `paused` flag to status; while paused, no NEW dispatch happens but
+        # in-flight workers keep running and are still reaped (FR-36).
+        for w in _apply_controls(run_dir, status):
+            _log(run_dir, "CONTROL WARN: " + w)
+        paused = bool(status.get("paused"))
         try:
             _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall)
-            dispatch_list = _dispatch(run_dir, runs, entries, pool_size, now)
+            if not paused:
+                dispatch_list = _dispatch(run_dir, runs, entries, pool_size, now)
         except Exception:  # never let a transition crash the loop
             _log(run_dir, "TICK ERROR:\n" + traceback.format_exc())
         if suppress_stall:
@@ -493,6 +569,7 @@ def tick(run_dir: Path) -> dict:
         "next_tick_minutes": next_minutes,
         "done": done,
         "stop": stop,
+        "paused": bool(status.get("paused")),
     }
 
 
@@ -752,6 +829,11 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
         # FR-21b: the diagnostic hint travels with the table, not just the
         # result record — LAUNCH-FAIL covers more than auth.
         rows.append("LAUNCH-FAIL: " + _LAUNCH_FAIL_HINT + ".")
+    if status.get("paused") and not terminal:
+        # FR-36: PAUSED banner while paused (no new dispatch; in-flight workers
+        # keep running). Drop RESUME or remove PAUSE to resume.
+        rows.append("PAUSED - no new dispatch; drop a RESUME file (or remove "
+                    "PAUSE) to resume. In-flight workers keep running.")
     if terminal:
         # ASCII only (no em-dash / box-drawing / arrows) — the status
         # table prints on Windows cp1252 consoles (185 print-path lesson).
