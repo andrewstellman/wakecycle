@@ -248,6 +248,33 @@ _DEFAULT_LAUNCH_GRACE_MIN = 10
 _DEFAULT_STALL_THRESHOLD_MIN = 45
 
 
+def _grace_stall_secs(args) -> tuple:
+    """Resolve (launch_grace_secs, stall_secs) from the args, honoring an
+    EXPLICIT value via `is not None` -- an explicit 0 must not be silently
+    replaced by the default (it floors to a 1s keepalive interval via
+    keepalive_interval_secs, the Postel 'reject non-positive, retain floor'
+    posture used for CADENCE/POOL). Iteration-7 review fold-in."""
+    g = (args.launch_grace_minutes if args.launch_grace_minutes is not None
+         else _DEFAULT_LAUNCH_GRACE_MIN)
+    s = (args.stall_threshold_minutes if args.stall_threshold_minutes is not None
+         else _DEFAULT_STALL_THRESHOLD_MIN)
+    return g * 60, s * 60
+
+
+def _pid_alive(pid: int) -> bool:
+    """True if a process with this PID exists (stdlib signal-0 probe).
+    PermissionError means it exists but isn't ours (still alive)."""
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
+
 def _now() -> float:
     """Wall-clock epoch seconds, honoring the WAKECYCLE_NOW seam (instr 018) so
     the keepalive cadence is unit-testable without real sleeps."""
@@ -332,8 +359,7 @@ def _cmd_wrap(args) -> int:
         print(f"{_NAME} wrap: no command given (use: wrap ... -- <cmd> [args])",
               file=sys.stderr)
         return 64
-    grace_secs = (args.launch_grace_minutes or _DEFAULT_LAUNCH_GRACE_MIN) * 60
-    stall_secs = (args.stall_threshold_minutes or _DEFAULT_STALL_THRESHOLD_MIN) * 60
+    grace_secs, stall_secs = _grace_stall_secs(args)   # honors an explicit 0
     interval = keepalive_interval_secs(grace_secs, stall_secs)
     capture_path = (Path(args.capture_file) if args.capture_file
                     else Path(hb).parent / "wrap.out")
@@ -391,6 +417,169 @@ def _cmd_wrap(args) -> int:
     return 0 if rc == 0 else 1              # adapter mirrors the child's status
 
 
+# --- FR-41 tail-existing-log adapter ----------------------------------------
+# For a job that writes its OWN log, `tail` watches that log (it does NOT
+# capture the process's stdout), surfaces the most-recent line as the
+# IN_PROGRESS label, and decides doneness by PRECEDENCE:
+#   1. optional overlay -- a success/failure regex matched in NEW log lines, or
+#      a sentinel file the job touches (for jobs that signal only in their log);
+#   2. authoritative -- process exit (default COMPLETED on a clean exit), always
+#      available when the adapter owns/watches the process.
+# The engine never guesses a terminal from text; the ADAPTER emits it.
+
+
+class _LogTail:
+    """Incremental line reader over a growing log file (stdlib seek/tell).
+    ``new_lines()`` yields only COMPLETE lines appended since the last call; a
+    partial trailing line is buffered until its newline arrives, so a marker is
+    never matched against half a line."""
+
+    def __init__(self, path):
+        self.path = str(path)
+        self.pos = 0
+        self._buf = ""
+
+    def new_lines(self) -> list:
+        try:
+            with open(self.path, "r", encoding="utf-8", errors="replace") as fh:
+                fh.seek(self.pos)
+                chunk = fh.read()
+                self.pos = fh.tell()
+        except OSError:
+            return []
+        self._buf += chunk
+        out = []
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            out.append(line)
+        return out
+
+
+class _TailWatcher:
+    """Doneness decision for the tail adapter. ``poll()`` is ONE synchronous
+    step (no sleep, no blocking) returning 'COMPLETED'/'FAILED'/None, so the
+    precedence is deterministically unit-testable by driving the inputs (write
+    log lines, touch the sentinel, hand it a fake/real process)."""
+
+    def __init__(self, *, log_file, success_re=None, failure_re=None,
+                 sentinel=None, proc=None, pid=None):
+        self.tail = _LogTail(log_file)
+        self.success_re = success_re
+        self.failure_re = failure_re
+        self.sentinel = Path(sentinel) if sentinel else None
+        self.proc = proc        # a Popen we own (.poll())
+        self.pid = pid          # an external PID we only watch
+
+    def poll(self):
+        # (1) overlay: scan NEW log lines (failure wins over success on a line)
+        for line in self.tail.new_lines():
+            if self.failure_re and self.failure_re.search(line):
+                return "FAILED"
+            if self.success_re and self.success_re.search(line):
+                return "COMPLETED"
+        if self.sentinel is not None and self.sentinel.exists():
+            return "COMPLETED"
+        # (2) authoritative: process exit (default COMPLETED on a clean exit)
+        if self.proc is not None:
+            rc = self.proc.poll()
+            if rc is not None:
+                return "COMPLETED" if rc == 0 else "FAILED"
+        elif self.pid is not None and not _pid_alive(self.pid):
+            return "COMPLETED"
+        return None
+
+
+def _record_pid_in_lock(lock_path, pid) -> None:
+    """Record the adapter's SUPERVISED child/watched PID in the run's claim
+    lock, so the engine's existing dead-PID reap (A-5) backstops a sentinel/
+    regex that never arrives. Best-effort; never raises."""
+    try:
+        lock = Path(lock_path)
+        obj = json.loads(lock.read_text(encoding="utf-8")) if lock.is_file() else {}
+        if not isinstance(obj, dict):
+            obj = {}
+        obj["pid"] = int(pid)
+        tmp = lock.with_suffix(lock.suffix + ".tmp")
+        tmp.write_text(json.dumps(obj), encoding="utf-8")
+        tmp.replace(lock)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+_TAIL_POLL_SECONDS = 0.05
+
+
+def _cmd_tail(args) -> int:
+    hb, tid = _require_io(args)
+    if not args.log_file:
+        print(f"{_NAME} tail: --log-file is required", file=sys.stderr)
+        return 64
+    log_file = Path(args.log_file)
+    cmd = list(getattr(args, "command", None) or [])
+    if cmd and cmd[0] == "--":
+        cmd = cmd[1:]
+    grace_secs, stall_secs = _grace_stall_secs(args)
+    interval = keepalive_interval_secs(grace_secs, stall_secs)
+    success_re = __import__("re").compile(args.success_regex) if args.success_regex else None
+    failure_re = __import__("re").compile(args.failure_regex) if args.failure_regex else None
+
+    start = _now()
+    if _append_or_die(hb, build_progress(
+            label="tail: %s" % log_file.name, task_id=tid, status="STARTING",
+            ts=_iso_from_epoch(start))):
+        return 5
+
+    proc = None
+    watched_pid = None
+    if cmd:
+        # The adapter OWNS the job (it launches it). The job writes its own log;
+        # we do NOT capture its stdout -- we tail --log-file.
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+        except OSError as exc:
+            append_line(hb, build_terminal(
+                task_id=tid, status="FAILED", result_file=str(log_file),
+                summary="tail: could not launch %r (%s)" % (cmd, exc)))
+            return 1
+        watched_pid = proc.pid
+    elif args.pid is not None:
+        watched_pid = int(args.pid)
+
+    # PID backstop: record the supervised PID in the claim lock.
+    if watched_pid is not None and args.lock_file:
+        _record_pid_in_lock(args.lock_file, watched_pid)
+
+    watcher = _TailWatcher(log_file=log_file, success_re=success_re,
+                           failure_re=failure_re, sentinel=args.sentinel_file,
+                           proc=proc, pid=watched_pid)
+    ka = _Keepalive(hb_path=Path(hb), task_id=tid, capture_path=log_file,
+                    interval_secs=interval, start_ts=start)
+    terminal = None
+    # A pure-tail watch with no process and no sentinel/regex has no doneness
+    # signal -- guard against an unbounded loop (the engine's dead-PID backstop
+    # or an operator STOP handles such a job; the adapter shouldn't spin forever).
+    has_signal = (proc is not None or watched_pid is not None
+                  or args.sentinel_file or success_re or failure_re)
+    if not has_signal:
+        print(f"{_NAME} tail: no doneness signal (need a command, --pid, "
+              f"--sentinel-file, or a marker regex)", file=sys.stderr)
+        return 64
+    while terminal is None:
+        terminal = watcher.poll()
+        if terminal is not None:
+            break
+        ka.maybe_emit(_now())
+        time.sleep(_TAIL_POLL_SECONDS)
+
+    if _append_or_die(hb, build_terminal(
+            task_id=tid, status=terminal, result_file=str(log_file),
+            summary="tail: %s via %s" % (
+                terminal, "marker" if watcher.proc is None and watcher.pid is None
+                else "process-exit/marker"))):
+        return 5
+    return 0 if terminal == "COMPLETED" else 1
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog=_NAME, description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd")
@@ -432,6 +621,27 @@ def _build_parser() -> argparse.ArgumentParser:
                          "(default <heartbeat-dir>/wrap.out)")
     wr.add_argument("command", nargs=argparse.REMAINDER,
                     help="-- <command> [args...] to run")
+
+    ta = sub.add_parser("tail", help="tail a log a job already writes and emit "
+                                     "its heartbeat stream (FR-41)")
+    common(ta)
+    ta.add_argument("--log-file", default=None, required=False,
+                    help="the log file to tail (its last line is the label)")
+    ta.add_argument("--success-regex", default=None,
+                    help="optional: a log line matching this -> COMPLETED")
+    ta.add_argument("--failure-regex", default=None,
+                    help="optional: a log line matching this -> FAILED")
+    ta.add_argument("--sentinel-file", default=None,
+                    help="optional: this file existing -> COMPLETED")
+    ta.add_argument("--pid", type=int, default=None,
+                    help="optional: watch an external PID's exit (authoritative)")
+    ta.add_argument("--lock-file", default=None,
+                    help="optional: claim lock to record the supervised PID in "
+                         "(the engine's dead-PID reap backstop)")
+    ta.add_argument("--launch-grace-minutes", type=int, default=None)
+    ta.add_argument("--stall-threshold-minutes", type=int, default=None)
+    ta.add_argument("command", nargs=argparse.REMAINDER,
+                    help="-- <command> [args...] to launch+own (optional)")
     return p
 
 
@@ -450,6 +660,8 @@ def main(argv=None) -> int:
         return _cmd_terminal(args)
     if args.cmd == "wrap":
         return _cmd_wrap(args)
+    if args.cmd == "tail":
+        return _cmd_tail(args)
     parser.print_help(sys.stderr)
     return 64
 

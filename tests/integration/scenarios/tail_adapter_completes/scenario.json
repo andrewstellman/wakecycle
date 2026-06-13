@@ -1,0 +1,34 @@
+{
+  "description": "FR-41 tail adapter end-to-end via the one-field `adapter: tail` selector: the engine synthesizes the heartbeat.py tail worker_cmd (the operator wired nothing). The owned job writes its own log; a success_regex ('BUILD OK') in the log maps to COMPLETED, and the harness reaps it through the deterministic settle path.",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 1,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "tail-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "adapter": "tail",
+        "log_path": "{RUN_DIR}/job.log",
+        "success_regex": "BUILD OK",
+        "failure_regex": "BUILD FAILED",
+        "command": ["python3", "-c", "open('{RUN_DIR}/job.log','w').write('compiling step 1\\ncompiling step 2\\nBUILD OK\\n')"]
+      }
+    ]
+  },
+  "control": {
+    "max_ticks": 4
+  },
+  "expected": {
+    "done": true,
+    "run_states": {
+      "run-01": "completed"
+    },
+    "counts": {
+      "completed": 1
+    }
+  }
+}

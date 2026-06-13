@@ -73,6 +73,36 @@
             "type": "array",
             "items": { "type": "string" },
             "description": "shell mode only (optional): a cheap argv the ticker runs once before the first shell dispatch to verify the host CLI is present + authenticated (FR-16). A nonzero result marks the entry AUTH_OR_LAUNCH_FAILED with an actionable message instead of silently stalling."
+          },
+          "adapter": {
+            "type": "string",
+            "enum": ["wrap", "tail"],
+            "description": "FR-41 one-field selector. When set, the engine SYNTHESIZES the shell worker_cmd to invoke heartbeat.py, so the operator declares intent in one place and never hand-wires the helper. 'wrap': run `command` as a child and emit its heartbeat stream (doneness = exit code). 'tail': watch `log_path` a job already writes (doneness precedence: process-exit authoritative; optional success_regex/failure_regex/sentinel_file overlay; default COMPLETED on a clean exit). An adapter entry runs as dispatch_mode 'shell' and does not require worker_prompt/worker_cmd."
+          },
+          "command": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "adapter only: the argv to run. Required for adapter 'wrap'; optional for 'tail' (when wakecycle launches+owns the job that writes log_path)."
+          },
+          "log_path": {
+            "type": "string",
+            "description": "adapter 'tail' only (required): the log file the job writes; its most recent line becomes the IN_PROGRESS label."
+          },
+          "success_regex": {
+            "type": "string",
+            "description": "adapter 'tail' (optional overlay): a log line matching this maps to COMPLETED."
+          },
+          "failure_regex": {
+            "type": "string",
+            "description": "adapter 'tail' (optional overlay): a log line matching this maps to FAILED (failure wins over success on a line)."
+          },
+          "sentinel_file": {
+            "type": "string",
+            "description": "adapter 'tail' (optional overlay): this file existing maps to COMPLETED."
+          },
+          "pid": {
+            "type": "integer",
+            "description": "adapter 'tail' (optional): watch an external process's exit as the authoritative doneness signal (recorded in the claim lock for the engine's dead-PID backstop)."
           }
         }
       }

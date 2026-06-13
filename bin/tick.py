@@ -831,6 +831,40 @@ def _resolve_template(tpl: str, values: dict) -> str:
     return out
 
 
+_VALID_ADAPTERS = ("wrap", "tail")
+
+
+def _adapter_worker_cmd(entry: dict):
+    """FR-41 selector: synthesize the shell worker_cmd for an entry that
+    declares ``adapter: "wrap"|"tail"`` — so the operator declares intent in
+    ONE place (the command for wrap, or the log path + optional markers for
+    tail) and never hand-wires the heartbeat.py invocation. Returns a token
+    list (with placeholders the dispatch resolver fills), or None when no
+    adapter is declared."""
+    adapter = entry.get("adapter")
+    if not adapter:
+        return None
+    helper = ["python3", "{HARNESS_BIN}/heartbeat.py", str(adapter),
+              "--task-id", "{TASK_ID}", "--heartbeat-path", "{HEARTBEAT_PATH}"]
+    if adapter == "wrap":
+        return helper + ["--"] + [str(t) for t in (entry.get("command") or [])]
+    if adapter == "tail":
+        out = helper + ["--log-file", str(entry.get("log_path", "")),
+                        "--lock-file", "{LOCK_FILE}"]
+        if entry.get("success_regex"):
+            out += ["--success-regex", str(entry["success_regex"])]
+        if entry.get("failure_regex"):
+            out += ["--failure-regex", str(entry["failure_regex"])]
+        if entry.get("sentinel_file"):
+            out += ["--sentinel-file", str(entry["sentinel_file"])]
+        if entry.get("pid") is not None:
+            out += ["--pid", str(entry["pid"])]
+        if entry.get("command"):
+            out += ["--"] + [str(t) for t in entry["command"]]
+        return out
+    return None
+
+
 def _dispatch(run_dir, runs, entries, pool_size, now) -> list[dict]:
     """Emit dispatch entries for queued runs while a pool slot is free.
     Guarded: a run already past queued is never re-dispatched.
@@ -850,7 +884,8 @@ def _dispatch(run_dir, runs, entries, pool_size, now) -> list[dict]:
         if inflight >= pool_size:
             break
         entry = entries[name]
-        mode = entry.get("dispatch_mode", "subagent")
+        adapter_cmd = _adapter_worker_cmd(entry)   # FR-41: synthesized if adapter set
+        mode = "shell" if adapter_cmd is not None else entry.get("dispatch_mode", "subagent")
         values = {
             "HEARTBEAT_PATH": str(_heartbeat_path(run_dir, name)),
             "TASK_ID": str(entry.get("task_id", "")),
@@ -879,9 +914,13 @@ def _dispatch(run_dir, runs, entries, pool_size, now) -> list[dict]:
             # resolve the worker_cmd template; the ticker Popens it detached.
             prompt_file = run_dir / "queue" / (r["job_id"] + ".prompt.txt")
             prompt_file.write_text(prompt, encoding="utf-8")
-            sh_values = dict(values, PROMPT_FILE=str(prompt_file))
+            lock_file = run_dir / "claimed" / (r["job_id"] + ".lock")
+            sh_values = dict(values, PROMPT_FILE=str(prompt_file),
+                             LOCK_FILE=str(lock_file))   # FR-41 PID backstop
+            cmd_template = (adapter_cmd if adapter_cmd is not None
+                            else (entry.get("worker_cmd") or []))
             worker_cmd = [_resolve_template(tok, sh_values)
-                          for tok in (entry.get("worker_cmd") or [])]
+                          for tok in cmd_template]
             out.append({
                 "run": name, "task_id": r["task_id"],
                 "dispatch_mode": "shell",
@@ -1127,19 +1166,49 @@ def _run_auth_check(argv) -> tuple:
     return proc.returncode, "rc=%d" % proc.returncode
 
 
+def _check_adapter_entry(tag: str, e: dict) -> list:
+    """FR-41: validate an `adapter: wrap|tail` entry. The engine synthesizes
+    the worker_cmd, so the worker_prompt/placeholder plumbing is NOT required
+    here — the operator declares intent in one place."""
+    p = []
+    adapter = e.get("adapter")
+    if adapter not in _VALID_ADAPTERS:
+        p.append("%s.adapter: must be one of %s (got %r)"
+                 % (tag, list(_VALID_ADAPTERS), adapter))
+    if e.get("dispatch_mode") not in (None, "shell"):
+        p.append("%s.dispatch_mode: an adapter entry runs as 'shell' "
+                 "(got %r)" % (tag, e.get("dispatch_mode")))
+    if adapter == "wrap":
+        cmd = e.get("command")
+        if not (isinstance(cmd, list) and cmd and all(isinstance(t, str) for t in cmd)):
+            p.append("%s.command: wrap requires a non-empty array of strings" % tag)
+    elif adapter == "tail":
+        if not (isinstance(e.get("log_path"), str) and e.get("log_path")):
+            p.append("%s.log_path: tail requires a non-empty string" % tag)
+        if "command" in e and not (isinstance(e["command"], list)
+                                   and all(isinstance(t, str) for t in e["command"])):
+            p.append("%s.command: must be an array of strings" % tag)
+        for key in ("success_regex", "failure_regex", "sentinel_file"):
+            if key in e and not isinstance(e[key], str):
+                p.append("%s.%s: must be a string" % (tag, key))
+        if "pid" in e and not (isinstance(e["pid"], int) and not isinstance(e["pid"], bool)):
+            p.append("%s.pid: must be an integer" % tag)
+    return p
+
+
 def _check_entry(i: int, e, run_auth: bool) -> list:
     tag = "entries[%d]" % i
     if not isinstance(e, dict):
         return ["%s: must be a JSON object" % tag]
     p = []
-    # required string fields
-    for key in ("task_id", "target_repo", "worker_prompt"):
+    # task_id / target_repo always required; worker_prompt required EXCEPT for
+    # an adapter entry (the adapter synthesizes its own plumbing, FR-41).
+    is_adapter = bool(e.get("adapter"))
+    required = ("task_id", "target_repo") if is_adapter else (
+        "task_id", "target_repo", "worker_prompt")
+    for key in required:
         if not (isinstance(e.get(key), str) and e.get(key)):
             p.append("%s.%s: required non-empty string" % (tag, key))
-    mode = e.get("dispatch_mode")
-    if mode not in _VALID_DISPATCH_MODES:
-        p.append("%s.dispatch_mode: must be one of %s (got %r)"
-                 % (tag, list(_VALID_DISPATCH_MODES), mode))
     # optional typed fields
     if "heartbeat_path" in e and not isinstance(e["heartbeat_path"], str):
         p.append("%s.heartbeat_path: must be a string" % tag)
@@ -1147,39 +1216,50 @@ def _check_entry(i: int, e, run_auth: bool) -> list:
         if key in e and not (isinstance(e[key], list)
                              and all(isinstance(t, str) for t in e[key])):
             p.append("%s.%s: must be an array of strings" % (tag, key))
-    prompt = e.get("worker_prompt") if isinstance(e.get("worker_prompt"), str) else ""
-    cmd = e.get("worker_cmd") if isinstance(e.get("worker_cmd"), list) else []
-    cmd_text = " ".join(t for t in cmd if isinstance(t, str))
-    # placeholder presence -- reuse the engine tuples so it can't drift
-    if mode == "subagent":
-        for ph in _PLACEHOLDERS:
-            if ("{%s}" % ph) not in prompt:
-                p.append("%s.worker_prompt: missing placeholder {%s}" % (tag, ph))
-    elif mode == "shell":
-        if not cmd:
-            p.append("%s.worker_cmd: required (non-empty) for shell dispatch" % tag)
-        else:
-            hb = "{%s}" % _HEARTBEAT_PLACEHOLDER
-            via_cmd = hb in cmd_text
-            via_prompt = ("{PROMPT_FILE}" in cmd_text) and (hb in prompt)
-            if not (via_cmd or via_prompt):
-                p.append("%s: shell entry has no route for %s -- put it in "
-                         "worker_cmd, or reference {PROMPT_FILE} in worker_cmd "
-                         "with the prompt carrying it" % (tag, hb))
-    # typo / drift catch: any placeholder-shaped token that isn't a known one
-    for tok in sorted(set(_PLACEHOLDER_TOKEN_RE.findall(prompt + " " + cmd_text))):
-        if tok not in _KNOWN_PLACEHOLDERS:
-            p.append("%s: unknown placeholder {%s} (known: %s)"
-                     % (tag, tok, ", ".join(sorted(_KNOWN_PLACEHOLDERS))))
-    # target_repo existence
+
+    if is_adapter:
+        # The engine builds the worker_cmd from the adapter config; validate
+        # that config and SKIP the manual worker_prompt/placeholder checks.
+        p.extend(_check_adapter_entry(tag, e))
+    else:
+        mode = e.get("dispatch_mode")
+        if mode not in _VALID_DISPATCH_MODES:
+            p.append("%s.dispatch_mode: must be one of %s (got %r)"
+                     % (tag, list(_VALID_DISPATCH_MODES), mode))
+        prompt = e.get("worker_prompt") if isinstance(e.get("worker_prompt"), str) else ""
+        cmd = e.get("worker_cmd") if isinstance(e.get("worker_cmd"), list) else []
+        cmd_text = " ".join(t for t in cmd if isinstance(t, str))
+        # placeholder presence -- reuse the engine tuples so it can't drift
+        if mode == "subagent":
+            for ph in _PLACEHOLDERS:
+                if ("{%s}" % ph) not in prompt:
+                    p.append("%s.worker_prompt: missing placeholder {%s}" % (tag, ph))
+        elif mode == "shell":
+            if not cmd:
+                p.append("%s.worker_cmd: required (non-empty) for shell dispatch" % tag)
+            else:
+                hb = "{%s}" % _HEARTBEAT_PLACEHOLDER
+                via_cmd = hb in cmd_text
+                via_prompt = ("{PROMPT_FILE}" in cmd_text) and (hb in prompt)
+                if not (via_cmd or via_prompt):
+                    p.append("%s: shell entry has no route for %s -- put it in "
+                             "worker_cmd, or reference {PROMPT_FILE} in worker_cmd "
+                             "with the prompt carrying it" % (tag, hb))
+        # typo / drift catch: any placeholder-shaped token that isn't a known one
+        for tok in sorted(set(_PLACEHOLDER_TOKEN_RE.findall(prompt + " " + cmd_text))):
+            if tok not in _KNOWN_PLACEHOLDERS:
+                p.append("%s: unknown placeholder {%s} (known: %s)"
+                         % (tag, tok, ", ".join(sorted(_KNOWN_PLACEHOLDERS))))
+        # optional auth_check (opt-in: external commands only run with --run-auth)
+        if run_auth and mode == "shell" and isinstance(e.get("auth_check"), list) and e["auth_check"]:
+            rc, detail = _run_auth_check(e["auth_check"])
+            if rc != 0:
+                p.append("%s.auth_check: failed (%s)" % (tag, detail))
+
+    # target_repo existence (both paths)
     tr = e.get("target_repo")
     if isinstance(tr, str) and tr and not Path(tr).is_dir():
         p.append("%s.target_repo: not an existing directory: %s" % (tag, tr))
-    # optional auth_check (opt-in: external commands only run with --run-auth)
-    if run_auth and mode == "shell" and isinstance(e.get("auth_check"), list) and e["auth_check"]:
-        rc, detail = _run_auth_check(e["auth_check"])
-        if rc != 0:
-            p.append("%s.auth_check: failed (%s)" % (tag, detail))
     return p
 
 
