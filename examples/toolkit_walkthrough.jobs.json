@@ -1,0 +1,13 @@
+{
+  "description": "TOOLKIT.md worked example: the shorthand a request like 'review repo-a and repo-b for bugs with an in-session agent, and run the test suite in repo-c' produces. Expand with `jobs.py expand`, then `tick.py --check`. Edit the repo paths before running.",
+  "pool_size": 2,
+  "tick_interval_minutes": 5,
+  "jobs": [
+    {"id": "review-a", "repo": "/abs/repo-a", "agent": "subagent",
+     "prompt": "Review this repository for bugs and risky patterns; summarize the findings in a short report."},
+    {"id": "review-b", "repo": "/abs/repo-b", "agent": "subagent",
+     "prompt": "Review this repository for missing or weak test coverage."},
+    {"id": "tests-c", "repo": "/abs/repo-c", "adapter": "wrap",
+     "command": ["pytest", "-q"]}
+  ]
+}

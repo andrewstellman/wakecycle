@@ -53,6 +53,58 @@ Nothing needs root. The only requirements are user-level Python 3.10+ and, if
 your workers are AI agents, a host CLI (Claude Code, Codex, Copilot, …) on
 PATH and authenticated.
 
+## Building a plan from a description (the procedure)
+
+*This is the primary job of this file: the operator describes a batch in plain
+language — "run **this** across **these** repos with **these** agents/commands"
+— and you, the assistant, turn it into a conformant plan that passes
+`--check` on the first try. Follow these steps; pull field details from the
+sections below.*
+
+**Step 1 — gather the batch.** From the request, extract: the list of
+**repos/targets** (absolute paths); per target, **what runs** (an AI-agent
+prompt, or a shell command, or a log a job already writes); and the **pool
+size / cadence** if they care (else defaults).
+
+**Step 2 — pick the dispatch for each job** (decision table):
+
+| The job is… | Use | Form |
+|---|---|---|
+| an AI agent working **inside this session** (rung 1) | `dispatch_mode: subagent` | a `prompt` |
+| a command **wakecycle launches** (test/build/script, any CLI) | `adapter: "wrap"` | a `command` |
+| a process **something else launches** that writes its own log | `adapter: "tail"` | a `log_path` (+ optional `success_regex`/`failure_regex`/`sentinel_file`) |
+| a host-CLI agent you invoke by argv yourself (advanced) | `dispatch_mode: shell` | a `worker_cmd` |
+
+Rule of thumb: **subagent** when this session does the work; **wrap** when
+wakecycle owns the launch; **tail** when something else does. Prefer `wrap`/
+`tail` over a hand-written `worker_cmd` — the adapter wires the heartbeat
+plumbing for you.
+
+**Step 3 — choose the form.** Default to the **`jobs:` shorthand** (one line
+per job; the expander injects placeholders and adapter plumbing). Drop to the
+**full plan** only when you need a field the shorthand doesn't expose. Either
+way the engine consumes the same canonical `plan.json`.
+
+**Step 4 — write it, never hand-writing paths.** The engine substitutes
+`{HEARTBEAT_PATH}`/`{TASK_ID}`/`{RUN_DIR}`/`{TARGET_REPO}`/`{HARNESS_BIN}` at
+dispatch. **Never** ask the model to fill a real path into a prompt (FR-21a — a
+hand-copied path once silently killed a job). In the shorthand you don't write
+placeholders at all; in a full subagent `worker_prompt` use the placeholder
+tokens verbatim.
+
+**Step 5 — expand + pre-flight, always.** If you wrote shorthand, expand it;
+then `--check` before launching:
+
+```bash
+python3 bin/jobs.py expand my_jobs.json > plan.json   # shorthand -> canonical
+python3 bin/tick.py --check plan.json                  # validate -- fix every problem it lists
+```
+
+`--check` reports **all** problems at once (missing fields, a bad
+`dispatch_mode`, a missing placeholder, a non-existent `target_repo`, an
+unknown `adapter`) and exits nonzero. A clean `--check` is the green light to
+`--init` and run. See the worked example at the end of this file.
+
 ## Writing a plan
 
 A plan is one JSON file. Top-level knobs (all optional except `entries`):
@@ -127,6 +179,56 @@ A `subagent` entry is run by an in-session agent (rung 1 only). A `shell`
 entry is run by the ticker as a detached process (rungs 2–4). The third entry
 points the harness at a status file the job already maintains, with no change
 to the job.
+
+## The `jobs:` shorthand (the quick form)
+
+Most plans don't need the full entry shape. The **`jobs:` shorthand** is a
+higher-level form the expander (`bin/jobs.py`) turns into the canonical
+`plan.json` — injecting the placeholders and adapter plumbing so the result
+passes `--check`. The engine only ever sees the expanded plan; the shorthand is
+pure convenience (the low-level schema stays canonical).
+
+Each job in `jobs:` is one of:
+
+```jsonc
+{ "repo": "/abs/repo-a", "agent": "subagent", "prompt": "Review for security bugs." }
+{ "repo": "/abs/repo-b", "adapter": "wrap", "command": ["pytest", "-q"] }
+{ "repo": "/abs/repo-c", "adapter": "tail", "log_path": "/abs/repo-c/build.log",
+  "success_regex": "BUILD OK", "failure_regex": "BUILD FAILED" }
+```
+
+Top-level knobs (`pool_size`, `tick_interval_minutes`, …) sit beside `jobs:` and
+pass through. Add an `"id"` to a job to set its `task_id` (else `job-NN`).
+Expand with `python3 bin/jobs.py expand my_jobs.json > plan.json`. Ready-to-edit
+templates live in **`examples/`** (`agent_review`, `shell_jobs`, `mixed`,
+`wrap_vs_tail`, plus a `canonical_plan`); each one expands to a `--check`-clean
+plan.
+
+## Adapters: turn any command or log into a job (`wrap` / `tail`)
+
+An adapter makes a non-AI job a conformant worker with **no change to the
+command**:
+
+- **`wrap`** — wakecycle launches your `command` as a child, captures its
+  stdout+stderr, emits keepalives, and reports **COMPLETED/FAILED straight from
+  the exit code** (never by parsing output). Use when wakecycle owns the launch.
+- **`tail`** — wakecycle watches a `log_path` a job already writes, surfaces its
+  latest line as the activity, and decides doneness by **precedence**: an
+  optional `success_regex`/`failure_regex`/`sentinel_file` overlay (for jobs
+  that signal only in their log), then the authoritative process exit (default
+  COMPLETED on a clean exit). Use when something else owns the launch.
+
+In the shorthand you just set `adapter` + its command/log; the engine
+synthesizes the `heartbeat.py wrap|tail …` invocation. (Under the hood that's
+the `adapter` field on a `shell` entry — you never wire it by hand.)
+
+## Pre-flight: always `--check` before launching
+
+`python3 bin/tick.py --check <plan>` validates a plan **before** you spend
+anything — schema, required placeholders, `target_repo` existence, the adapter
+config — and reports every problem at once. Make it a habit: **expand →
+`--check` → `--init` → run.** A reactive `LAUNCH-FAIL` after spend is exactly
+what the pre-flight prevents.
 
 ## Choosing a rung (which entry point?)
 
@@ -273,3 +375,50 @@ skips a malformed line with a warning rather than dying.
   safe by construction (that's what makes the safety tick free).
 - *Windows / locked-down machine?* That's the design floor — rung 3, one
   terminal, no admin.
+
+## Worked example: request → shorthand → plan → check
+
+**The operator says:** *"Review repo-a and repo-b for bugs with an in-session
+agent, and run the test suite in repo-c."*
+
+**You write the `jobs:` shorthand** (`examples/toolkit_walkthrough.jobs.json`) —
+two subagent reviews + one wrapped shell command, no placeholders typed by hand:
+
+```json
+{
+  "pool_size": 2,
+  "tick_interval_minutes": 5,
+  "jobs": [
+    {"id": "review-a", "repo": "/abs/repo-a", "agent": "subagent",
+     "prompt": "Review this repository for bugs and risky patterns; summarize the findings."},
+    {"id": "review-b", "repo": "/abs/repo-b", "agent": "subagent",
+     "prompt": "Review this repository for missing or weak test coverage."},
+    {"id": "tests-c", "repo": "/abs/repo-c", "adapter": "wrap",
+     "command": ["pytest", "-q"]}
+  ]
+}
+```
+
+**Expand it.** `python3 bin/jobs.py expand examples/toolkit_walkthrough.jobs.json`
+produces the canonical plan: each subagent job becomes an entry whose
+`worker_prompt` carries the injected placeholder header
+(`HEARTBEAT_PATH={HEARTBEAT_PATH}` … `HARNESS_BIN={HARNESS_BIN}`) followed by
+the prompt; the `wrap` job becomes a `shell` entry with `adapter: "wrap"` and
+the command — the engine synthesizes its `heartbeat.py wrap …` invocation.
+
+**Pre-flight.** `python3 bin/tick.py --check plan.json`, once the repo paths
+point at real directories, prints:
+
+```
+plan OK: plan.json -- no problems found
+```
+
+Then `--init` and run at your chosen rung. If anything is wrong it prints
+`plan FAILED: <plan> -- N problem(s):` followed by one line per problem (it
+reports them all at once) and exits nonzero — fix every one.
+
+> The repo paths above are placeholders to edit. `--check` requires each
+> `target_repo` to be a real directory; everything else (schema, the injected
+> placeholders, the adapter config) validates as written. The `examples/`
+> templates are bound to `--check` in the test suite, so this walkthrough can't
+> silently drift from what the engine accepts.
