@@ -531,11 +531,27 @@ def _ctl_pool(run_dir: Path, status: dict, warnings: list) -> None:
     _consume_control(run_dir, "POOL")
 
 
+_POLL_NOW_CADENCE_MINUTES = 1   # the immediate/minimum cadence POLL-NOW forces
+
+
+def _ctl_poll_now(run_dir: Path, status: dict, warnings: list) -> None:
+    """FR-38: a one-shot forced tick -- the file-based "run another tick now".
+    Signals tick() (via a TRANSIENT flag, popped before persist, never sticky)
+    to collapse next_tick_minutes to the immediate minimum, then consumes the
+    file. Does NOT pierce PAUSE (FR-35 precedence; applied last): while paused
+    it is inert and LEFT on disk to fire after RESUME -- paused dominates."""
+    if status.get("paused"):
+        return                          # inert; wait for RESUME (not consumed)
+    status["_poll_now"] = True          # transient: read+popped in tick()
+    _consume_control(run_dir, "POLL-NOW")
+
+
 # The handler registry IS the extension point: Iterations 3-5 register CANCEL /
 # CADENCE / POOL / POLL-NOW here without touching tick(). A name in
 # _CONTROL_ORDER with no handler is recognized-but-unhandled (left on disk).
 _CONTROL_HANDLERS = {"PAUSE": _ctl_pause, "RESUME": _ctl_resume,
-                     "CADENCE": _ctl_cadence, "POOL": _ctl_pool}
+                     "CADENCE": _ctl_cadence, "POOL": _ctl_pool,
+                     "POLL-NOW": _ctl_poll_now}
 
 
 def _apply_controls(run_dir: Path, status: dict) -> list:
@@ -585,6 +601,7 @@ def tick(run_dir: Path) -> dict:
 
     stop = (run_dir / "STOP").exists()
     dispatch_list: list[dict] = []
+    poll_now = False                     # FR-38: set by a POLL-NOW control (not paused)
 
     # E2: a wall-clock gap since the last tick much larger than the cadence
     # means the machine slept/hibernated — heartbeat ages are inflated, so
@@ -610,6 +627,10 @@ def tick(run_dir: Path) -> dict:
         # no such wiring -- their `paused` effect already gated _dispatch.)
         pool_size = status.get("pool_size") or pool_size
         tick_interval = _effective_interval(status, plan)
+        # FR-38: POLL-NOW signalled a forced tick (only when NOT paused -- the
+        # handler is inert under PAUSE). Read+pop the transient flag here, BEFORE
+        # the persist below, so it never becomes sticky (one-shot).
+        poll_now = bool(status.pop("_poll_now", False))
         try:
             _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall)
             if not paused:
@@ -623,6 +644,13 @@ def tick(run_dir: Path) -> dict:
         status["done"] = all(r["state"] in _TERMINAL_STATES for r in runs.values())
         status["cycle"] = status.get("cycle", 0) + 1
         status["last_tick_wall"] = now
+        # FR-38: POLL-NOW collapses the next cadence to the immediate minimum,
+        # overriding whatever _next_cadence would return (idle multiplier OR a
+        # CADENCE override from Iter 3) for this one envelope. Persist it so the
+        # chosen cadence is auditable on disk (and observable by the checker).
+        next_minutes = (_POLL_NOW_CADENCE_MINUTES if poll_now
+                        else _next_cadence(status, tick_interval, idle_mult))
+        status["next_tick_minutes"] = next_minutes
         # strip transient field, then persist
         for r in runs.values():
             r.pop("_run_name", None)
@@ -630,10 +658,12 @@ def tick(run_dir: Path) -> dict:
     else:
         for r in runs.values():
             r.pop("_run_name", None)
+        # STOP tick is read-only: don't re-persist. Report the cadence the
+        # already-persisted state implies (no POLL-NOW on a STOP tick).
+        next_minutes = _next_cadence(status, tick_interval, idle_mult)
 
     done = status["done"]
     table = _format_table(run_dir, status, plan, terminal=(done or stop))
-    next_minutes = _next_cadence(status, tick_interval, idle_mult)
     return {
         "dispatch_list": dispatch_list,
         "status_table": table,

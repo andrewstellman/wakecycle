@@ -129,6 +129,7 @@ def run_scenario(scenario_dir, work_dir):
     pool_value = control.get("pool_value")
     cadence_after = control.get("write_cadence_after_tick")
     cadence_value = control.get("cadence_value")
+    pollnow_after = control.get("write_pollnow_after_tick")  # FR-38: one-shot
     max_ticks = int(control.get("max_ticks", _MAX_TICKS))
 
     run_dir = None
@@ -148,7 +149,8 @@ def run_scenario(scenario_dir, work_dir):
         if status is None:
             continue
         trace.append({"counts": dict(status.get("counts", {})),
-                      "paused": bool(status.get("paused"))})
+                      "paused": bool(status.get("paused")),
+                      "next_tick_minutes": status.get("next_tick_minutes")})
 
         # drop control files at the scenario's scripted tick boundaries.
         # Value-carrying controls (FR-37) write the value into the file BODY.
@@ -160,6 +162,8 @@ def run_scenario(scenario_dir, work_dir):
             (run_dir / "POOL").write_text(str(pool_value), encoding="utf-8")
         if cadence_after == tick_no:
             (run_dir / "CADENCE").write_text(str(cadence_value), encoding="utf-8")
+        if pollnow_after == tick_no:
+            (run_dir / "POLL-NOW").touch()
         if stop_after == tick_no:
             pre_stop = copy.deepcopy(status)     # snapshot BEFORE the stop tick
             (run_dir / "STOP").touch()

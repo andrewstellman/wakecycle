@@ -78,6 +78,23 @@ def check(run_dir, expected):
             fails.append("max in-flight %d never reached expected %d"
                          % (worst, expected["max_inflight_ge"]))
 
+    # 5b. reported cadence bounds across the trace (FR-38 POLL-NOW collapse):
+    # min_next_cadence proves some tick collapsed to the minimum; max_next
+    # proves the run was otherwise idling at a long cadence (so the collapse is
+    # meaningful, not a trivially-short cadence).
+    if "min_next_cadence" in expected or "max_next_cadence" in expected:
+        cadences = [t.get("next_tick_minutes") for t in (meta.get("tick_trace") or [])
+                    if t.get("next_tick_minutes") is not None]
+        if not cadences:
+            fails.append("no next_tick_minutes recorded in the tick trace")
+        else:
+            if "min_next_cadence" in expected and min(cadences) != expected["min_next_cadence"]:
+                fails.append("min next-cadence: expected %r, got %r (trace %r)"
+                             % (expected["min_next_cadence"], min(cadences), cadences))
+            if "max_next_cadence" in expected and max(cadences) != expected["max_next_cadence"]:
+                fails.append("max next-cadence: expected %r, got %r (trace %r)"
+                             % (expected["max_next_cadence"], max(cadences), cadences))
+
     # 6. STOP read-only: the stop tick changed NOTHING (not even cycle)
     if expected.get("stop_readonly"):
         pre = meta.get("pre_stop_status")
