@@ -161,7 +161,8 @@ trust a DESIGNED cell as if it were proven.
 | OS scheduler, cadence 2 — **cron (macOS)** | shell | **VERIFIED** | cron drove a shell plan to `done` fully unattended (no foreground process), 2026-06-12, after the double-fork detachment fix that lets workers survive the cron job's process-tree teardown; E1 overlapping-fire lockfile skip witnessed; crontab snapshot/restored (VALIDATION V-9). |
 | OS scheduler, cadence 2 — Windows Task Scheduler / other hosts | shell | **DESIGNED** | `--once` is the cross-host schedule target and unit-tested; no Windows/other scheduled-run yet |
 | Windows / Linux, foreground ticker | shell | **DESIGNED** | Platform branches are stdlib + unit-tested (detach flags, PID liveness, lockfile); verified live on macOS only |
-| Codex / Copilot / Cursor CLIs as workers | shell | **DESIGNED** | `worker_cmd` is CLI-agnostic by design; per-host validation is v0.2 |
+| **Copilot + Codex** CLIs as workers (macOS, rung 3) | shell | **VERIFIED** | both ran as detached `worker_cmd` agent workers under the plain ticker (no agent-orchestrator), 2026-06-12: heartbeated STARTING/running, terminal COMPLETED carrying a real `result_file` with a real summary (Copilot→README, Codex→REQUIREMENTS); auth pre-flight ran (FR-16) (VALIDATION V-14). |
+| Cursor CLI + per-host orchestrator matrices | shell | **DESIGNED** | `worker_cmd` is CLI-agnostic; Cursor + the cross-host matrix are v0.2 |
 
 The in-session timer (rung 1) is reliable *as a timer* but the resumed turn
 has a host-side fragility — see the safety tick.
