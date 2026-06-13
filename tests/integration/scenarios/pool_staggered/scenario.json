@@ -1,0 +1,80 @@
+{
+  "description": "Pool-limited dispatch + staggered back-fill: 3 entries, pool 2; the 3rd is held back until a slot frees, so in-flight never exceeds 2.",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 2,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "pool-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub pool-1",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "3",
+          "--sleep",
+          "0.3"
+        ]
+      },
+      {
+        "task_id": "pool-2",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub pool-2",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "3",
+          "--sleep",
+          "0.3"
+        ]
+      },
+      {
+        "task_id": "pool-3",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub pool-3",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "3",
+          "--sleep",
+          "0.3"
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "done": true,
+    "counts": {
+      "completed": 3,
+      "failed": 0
+    },
+    "max_inflight_le": 2
+  }
+}

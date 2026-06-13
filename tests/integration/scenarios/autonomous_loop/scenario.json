@@ -1,0 +1,85 @@
+{
+  "description": "Autonomous multi-tick loop: 3 stub workers dispatched, each heartbeats then completes; the run reaches done across ticks.",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 3,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "auto-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub auto-1",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "2",
+          "--sleep",
+          "0.3"
+        ]
+      },
+      {
+        "task_id": "auto-2",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub auto-2",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "2",
+          "--sleep",
+          "0.3"
+        ]
+      },
+      {
+        "task_id": "auto-3",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub auto-3",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "2",
+          "--sleep",
+          "0.3"
+        ]
+      }
+    ]
+  },
+  "expected": {
+    "done": true,
+    "stopped": false,
+    "counts": {
+      "completed": 3,
+      "failed": 0
+    },
+    "run_states": {
+      "run-01": "completed",
+      "run-02": "completed",
+      "run-03": "completed"
+    }
+  }
+}

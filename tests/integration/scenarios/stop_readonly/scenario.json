@@ -1,0 +1,65 @@
+{
+  "description": "STOP read-only: a worker is dispatched and HELD open; a STOP file is written; the next tick is fully read-only (cycle and run states unchanged) and the run does not reach done.",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 1,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "stop-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub stop-1",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2",
+          "--hold-file",
+          "{RUN_DIR}/release_never"
+        ]
+      },
+      {
+        "task_id": "stop-2",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub stop-2",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2"
+        ]
+      }
+    ]
+  },
+  "control": {
+    "write_stop_after_tick": 2
+  },
+  "expected": {
+    "done": false,
+    "stopped": true,
+    "stop_readonly": true,
+    "run_states": {
+      "run-02": "queued"
+    }
+  }
+}
