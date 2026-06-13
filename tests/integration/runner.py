@@ -85,12 +85,15 @@ def run_scenario(scenario_dir, work_dir):
 
     control = scn.get("control") or {}
     stop_after = control.get("write_stop_after_tick")
+    pause_after = control.get("write_pause_after_tick")
+    resume_after = control.get("write_resume_after_tick")
+    max_ticks = int(control.get("max_ticks", _MAX_TICKS))
 
     run_dir = None
     trace = []
     pre_stop = None
     stopped = False
-    for tick_no in range(1, _MAX_TICKS + 1):
+    for tick_no in range(1, max_ticks + 1):
         target = str(plan_path) if run_dir is None else str(run_dir)
         subprocess.run([sys.executable, str(_TICKER), "--once", target],
                        env=env, stdout=subprocess.DEVNULL,
@@ -102,8 +105,14 @@ def run_scenario(scenario_dir, work_dir):
         status = _read_status(run_dir)
         if status is None:
             continue
-        trace.append(dict(status.get("counts", {})))
+        trace.append({"counts": dict(status.get("counts", {})),
+                      "paused": bool(status.get("paused"))})
 
+        # drop control files at the scenario's scripted tick boundaries
+        if pause_after == tick_no:
+            (run_dir / "PAUSE").touch()
+        if resume_after == tick_no:
+            (run_dir / "RESUME").touch()
         if stop_after == tick_no:
             pre_stop = copy.deepcopy(status)     # snapshot BEFORE the stop tick
             (run_dir / "STOP").touch()

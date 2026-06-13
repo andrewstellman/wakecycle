@@ -1,0 +1,65 @@
+{
+  "description": "PAUSE then RESUME: after resume the queued entry dispatches and the run reaches done.",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 1,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "pr-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub pr-1",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2"
+        ]
+      },
+      {
+        "task_id": "pr-2",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub pr-2",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.2"
+        ]
+      }
+    ]
+  },
+  "control": {
+    "write_pause_after_tick": 1,
+    "write_resume_after_tick": 4,
+    "max_ticks": 16
+  },
+  "expected": {
+    "done": true,
+    "paused": false,
+    "counts": {
+      "completed": 2,
+      "failed": 0
+    }
+  }
+}

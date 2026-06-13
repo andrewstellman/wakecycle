@@ -42,6 +42,11 @@ def check(run_dir, expected):
         fails.append("stopped: expected %r, got %r"
                      % (expected["stopped"], meta.get("stopped")))
 
+    # 2b. paused (FR-36) -- persisted in harness_status.json
+    if "paused" in expected and bool(status.get("paused")) != bool(expected["paused"]):
+        fails.append("paused: expected %r, got %r"
+                     % (expected["paused"], status.get("paused")))
+
     # 3. counts (subset match)
     counts = status.get("counts", {})
     for k, v in (expected.get("counts") or {}).items():
@@ -61,8 +66,9 @@ def check(run_dir, expected):
         cap = expected["max_inflight_le"]
         worst = 0
         for t in (meta.get("tick_trace") or []):
-            inflight = (t.get("claimed", 0) + t.get("running", 0)
-                        + t.get("stalled", 0))
+            c = t.get("counts", t)               # trace item carries {counts, paused}
+            inflight = (c.get("claimed", 0) + c.get("running", 0)
+                        + c.get("stalled", 0))
             worst = max(worst, inflight)
         if worst > cap:
             fails.append("max in-flight %d exceeded pool cap %d" % (worst, cap))
