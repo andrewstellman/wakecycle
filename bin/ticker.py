@@ -83,13 +83,72 @@ def _resolve_run_dir(engine, arg: str) -> Path:
     sys.exit(2)
 
 
-def _detach_kwargs() -> dict:
+def _spawn_worker(worker_cmd, env, cwd):
+    """Spawn a fully-detached worker and return its PID (the FINAL worker
+    PID, for the A-5 claim lock).
+
+    POSIX: a classic daemon **double-fork** (fork -> setsid -> fork). The
+    worker is the grandchild: reparented to init (PID 1 / launchd), in its own
+    session AND process group, with no controlling terminal and stdio at
+    /dev/null. This is what lets a worker survive when the spawner is a
+    cron/launchd `--once` job whose ENTIRE process tree is torn down on exit
+    (the V-9 finding: `start_new_session=True` alone is NOT enough -- launchd
+    kills the job's descendants regardless of session). The grandchild reports
+    its own PID back through a pipe BEFORE `exec` (exec preserves the PID), so
+    the claim lock carries the real worker PID and A-5 liveness stays correct.
+
+    Windows: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP via Popen (the
+    grandchild trick is POSIX-only; Windows has no fork and detaches via flags).
+    Returns the PID, or None if the spawn could not be reported.
+    """
     if os.name == "nt":
         flags = 0
         for attr in ("DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
             flags |= getattr(subprocess, attr, 0)
-        return {"creationflags": flags} if flags else {}
-    return {"start_new_session": True}
+        kw = {"creationflags": flags} if flags else {}
+        proc = subprocess.Popen(
+            worker_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, env=env, cwd=cwd, **kw)
+        return proc.pid
+    # POSIX double-fork
+    r, w = os.pipe()
+    child1 = os.fork()
+    if child1 > 0:
+        # spawner (the ticker): read the grandchild's PID, then reap child1.
+        os.close(w)
+        buf = b""
+        while True:
+            chunk = os.read(r, 64)
+            if not chunk:
+                break
+            buf += chunk
+        os.close(r)
+        os.waitpid(child1, 0)
+        try:
+            return int(buf.strip())
+        except ValueError:
+            return None
+    # child1: become a session leader, then fork the worker grandchild.
+    try:
+        os.close(r)
+        os.setsid()
+        grandchild = os.fork()
+        if grandchild > 0:
+            os._exit(0)            # child1 exits -> grandchild reparented to init
+        # grandchild (the worker): report PID, detach stdio, exec.
+        os.write(w, str(os.getpid()).encode())
+        os.close(w)
+        try:
+            os.chdir(cwd)
+        except OSError:
+            pass
+        devnull = os.open(os.devnull, os.O_RDWR)
+        os.dup2(devnull, 0)
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        os.execvpe(worker_cmd[0], list(worker_cmd), env)
+    except BaseException:
+        os._exit(127)             # exec failed -> grandchild dies; A-5 reaps it
 
 
 def _record_pid(run_dir: Path, run_name: str, pid) -> None:
@@ -177,13 +236,12 @@ def _spawn_dispatches(run_dir: Path, dispatch_list, auth_cache) -> None:
         env["HARNESS_RUN_DIR"] = entry.get("run_dir", "")
         env["HARNESS_TARGET_REPO"] = entry.get("target_repo", "")
         try:
-            proc = subprocess.Popen(
-                entry["worker_cmd"], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                env=env, cwd=str(run_dir), **_detach_kwargs())
-            _record_pid(run_dir, entry["run"], proc.pid)
+            pid = _spawn_worker(entry["worker_cmd"], env, str(run_dir))
+            if not pid:
+                raise OSError("worker spawn did not report a PID")
+            _record_pid(run_dir, entry["run"], pid)
             print("  spawned %s (pid %d): %s"
-                  % (entry["run"], proc.pid, " ".join(entry["worker_cmd"][:3]) + " ..."))
+                  % (entry["run"], pid, " ".join(entry["worker_cmd"][:3]) + " ..."))
         except (OSError, ValueError) as exc:
             print("  AUTH_OR_LAUNCH_FAILED: %s  -  spawn failed (%s)"
                   % (entry.get("run"), exc), file=sys.stderr)

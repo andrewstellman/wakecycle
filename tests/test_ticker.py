@@ -23,6 +23,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -170,6 +171,55 @@ class OnceModeTests(unittest.TestCase):
               "dispatch_mode": "subagent", "worker_prompt": "p"}], pool_size=1)))
         rc = _run_ticker(plan, "--once", runs_dir=self.runs)
         self.assertIn("only launches shell workers", rc.stderr)
+
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
+@unittest.skipIf(os.name == "nt", "POSIX double-fork daemonization")
+class WorkerDaemonizationTests(unittest.TestCase):
+    """instr 016 - the V-9 fix: a shell worker double-forks so it is
+    reparented to init and escapes the spawner's process tree (survives a
+    cron/launchd `--once` job whose whole tree is torn down on exit). The
+    returned PID must be the FINAL worker PID (A-5 claim-lock correctness).
+
+    MUTATION-VERIFY EVIDENCE (DEVELOPMENT_PROCESS, instr 016):
+      Pin: test_worker_double_forks_to_init_and_pid_is_final.
+      Mutation: in ticker._spawn_worker, replace the POSIX double-fork with a
+        single subprocess.Popen(..., start_new_session=True) returning
+        proc.pid. Observed: the worker's PPID is the spawner (this test
+        process), not 1 -> the `ppid == 1` assertion FAILs. Restored -> OK.
+    """
+
+    def test_worker_double_forks_to_init_and_pid_is_final(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            marker = d / "ident.txt"
+            script = d / "w.sh"
+            script.write_text('echo "$$:$PPID" > "%s"\nsleep 5\n' % marker)
+            pid = TICK._spawn_worker(["bash", str(script)], dict(os.environ),
+                                     str(d))
+            self.assertIsInstance(pid, int)
+            for _ in range(50):
+                if marker.exists() and marker.read_text().strip():
+                    break
+                time.sleep(0.1)
+            wpid, wppid = (int(x) for x in marker.read_text().strip().split(":"))
+            try:
+                self.assertEqual(wpid, pid)      # lock carries the final worker PID (A-5)
+                self.assertEqual(wppid, 1)       # reparented to init -> escaped the tree (pin)
+                self.assertTrue(_pid_alive(pid))
+            finally:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
 
 
 if __name__ == "__main__":
