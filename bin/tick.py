@@ -166,7 +166,11 @@ def _lock_pid(run_dir: Path, job_id: str):
 
 
 def _utc_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # Derive the ISO stamp from _now() so the WAKECYCLE_NOW clock seam is
+    # UNIFORM across the engine (epoch + ISO): claimed_ts/reaped_ts honor the
+    # same injected clock as claimed_at, making FR-45 durations deterministic in
+    # tests. No production effect without WAKECYCLE_NOW.
+    return datetime.fromtimestamp(_now(), timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _write_json(path: Path, data) -> None:
@@ -652,6 +656,101 @@ def _apply_controls(run_dir: Path, status: dict) -> list:
     return warnings
 
 
+# --- FR-45 SUMMARY roll-up --------------------------------------------------
+SUMMARY_SCHEMA_VERSION = "1"
+
+
+def _iso_to_epoch(iso):
+    """Parse a _utc_iso() timestamp back to epoch seconds, or None."""
+    if not iso:
+        return None
+    try:
+        return datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _read_result_record(run_dir: Path, job_id):
+    """The results/result-NNNNN.json record for a job_id, or None."""
+    if not job_id:
+        return None
+    rp = run_dir / "results" / (str(job_id).replace("job-", "result-") + ".json")
+    try:
+        return json.loads(rp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _md_cell(v) -> str:
+    if v is None:
+        return "-"
+    return str(v).replace("|", "\\|").replace("\n", " ")
+
+
+def _render_summary_md(payload: dict) -> str:
+    lines = ["# wakecycle run summary",
+             "",
+             "Run-dir: `%s`  -  generated %s"
+             % (payload["run_dir"], payload["generated_ts"]),
+             "",
+             "| Run | Task | State | Duration | Result file | Summary |",
+             "|-----|------|-------|----------|-------------|---------|"]
+    for j in payload["jobs"]:
+        dur = "-" if j["duration_seconds"] is None else "%ss" % j["duration_seconds"]
+        lines.append("| %s | %s | %s | %s | %s | %s |" % (
+            j["run"], _md_cell(j["task_id"]), j["state"], dur,
+            _md_cell(j["result_file"]), _md_cell(j["summary"])))
+    c = payload["counts"]
+    lines += ["",
+              "**Totals** - completed: %d, failed: %d, abandoned: %d, "
+              "auth/launch-failed: %d (of %d job(s))" % (
+                  c.get("completed", 0), c.get("failed", 0),
+                  c.get("abandoned", 0), c.get("auth_or_launch_failed", 0),
+                  len(payload["jobs"]))]
+    return "\n".join(lines) + "\n"
+
+
+def _write_summary(run_dir: Path, status: dict) -> None:
+    """FR-45: write SUMMARY.md (human) + summary.json (machine, schema_version'd)
+    capstones to the run-dir, sourced ENTIRELY from on-disk records (no new
+    tracking): per-job terminal state from status["runs"], result_file/summary
+    from results/, durations from claimed_at -> the result's reaped_ts, counts
+    from the recount. The CALLER guards this to the done-transition so a
+    post-done re-tick stays cycle-only (FR-6)."""
+    runs = status.get("runs", {})
+    jobs = []
+    for name in sorted(runs):
+        r = runs[name]
+        rec = _read_result_record(run_dir, r.get("job_id"))
+        claimed_at = r.get("claimed_at")
+        reaped = _iso_to_epoch((rec or {}).get("reaped_ts"))
+        # reaped_ts is second-granular (_utc_iso truncates) while claimed_at is
+        # a sub-second float; floor the claim to the second so both share
+        # granularity and a sub-second run reads 0.0s, never a spurious negative.
+        duration = (max(0.0, round(reaped - int(claimed_at), 1))
+                    if isinstance(claimed_at, (int, float)) and reaped is not None
+                    else None)
+        jobs.append({
+            "run": name,
+            "task_id": r.get("task_id"),
+            "state": r.get("state"),
+            "result_file": (rec or {}).get("result_file"),
+            "summary": (rec or {}).get("summary"),
+            "duration_seconds": duration,
+        })
+    payload = {
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "run_dir": run_dir.name,
+        "done": True,
+        "generated_ts": _utc_iso(),
+        "counts": dict(status.get("counts", {})),
+        "jobs": jobs,
+    }
+    _write_json(run_dir / "summary.json", payload)
+    (run_dir / "SUMMARY.md").write_text(_render_summary_md(payload), encoding="utf-8")
+
+
 def tick(run_dir: Path) -> dict:
     status = json.loads((run_dir / "harness_status.json").read_text(encoding="utf-8"))
     plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
@@ -711,10 +810,19 @@ def tick(run_dir: Path) -> dict:
         if suppress_stall:
             _log(run_dir, f"E2: wall-clock jump ({int(now - last_wall)}s since "
                           f"last tick) — stall marking suppressed this tick")
+        was_done = bool(status.get("done"))     # the persisted (pre-tick) value
         status["counts"] = _recount(runs)
         status["done"] = all(r["state"] in _TERMINAL_STATES for r in runs.values())
         status["cycle"] = status.get("cycle", 0) + 1
         status["last_tick_wall"] = now
+        # FR-45: write the SUMMARY capstones on the TRANSITION into done (or to
+        # backfill if a prior write was lost). The guard keeps a post-done
+        # idempotent re-tick cycle-only (FR-6): an already-done run with SUMMARY
+        # present is NOT rewritten.
+        if status["done"] and (not was_done or not (
+                (run_dir / "SUMMARY.md").exists()
+                and (run_dir / "summary.json").exists())):
+            _write_summary(run_dir, status)
         # FR-38: POLL-NOW collapses the next cadence to the immediate minimum,
         # overriding whatever _next_cadence would return (idle multiplier OR a
         # CADENCE override from Iter 3) for this one envelope. Persist it so the

@@ -31,6 +31,7 @@
     },
     "counts": {
       "completed": 1
-    }
+    },
+    "summary_present": true
   }
 }

@@ -113,6 +113,29 @@ def check(run_dir, expected):
                     fails.append("CANCEL altered a foreign record %s "
                                  "(not byte-identical across the cancel)" % name)
 
+    # 5d. FR-45 SUMMARY capstones on the done-transition.
+    if expected.get("summary_present"):
+        sm = os.path.join(run_dir, "SUMMARY.md")
+        sj = os.path.join(run_dir, "summary.json")
+        if not os.path.isfile(sm):
+            fails.append("SUMMARY.md missing on a done run")
+        if not os.path.isfile(sj):
+            fails.append("summary.json missing on a done run")
+        else:
+            s = _load(sj)
+            if not s.get("schema_version"):
+                fails.append("summary.json missing schema_version")
+            if not s.get("done"):
+                fails.append("summary.json done flag not set")
+            if s.get("counts") != status.get("counts"):
+                fails.append("summary.json counts %r != status counts %r"
+                             % (s.get("counts"), status.get("counts")))
+            sj_states = {j.get("run"): j.get("state") for j in s.get("jobs", [])}
+            st_states = {n: r.get("state") for n, r in runs.items()}
+            if sj_states != st_states:
+                fails.append("summary.json job states %r != run states %r"
+                             % (sj_states, st_states))
+
     # 6. STOP read-only: the stop tick changed NOTHING (not even cycle)
     if expected.get("stop_readonly"):
         pre = meta.get("pre_stop_status")
