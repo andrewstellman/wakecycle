@@ -1,0 +1,12 @@
+{
+  "description": "Shorthand (jobs:) -- the two adapter modes side by side. Use `wrap` when wakecycle launches the command; use `tail` when something else writes a log wakecycle should watch (doneness via the markers, or the process exit if a command/pid is given).",
+  "pool_size": 2,
+  "jobs": [
+    {"id": "wrap-job", "repo": "/path/to/repo-a", "adapter": "wrap",
+     "command": ["./run-build.sh", "--release"]},
+    {"id": "tail-job", "repo": "/path/to/repo-b", "adapter": "tail",
+     "log_path": "/path/to/repo-b/build.log",
+     "success_regex": "BUILD SUCCESSFUL",
+     "failure_regex": "BUILD FAILED"}
+  ]
+}

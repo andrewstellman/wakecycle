@@ -1,0 +1,13 @@
+{
+  "description": "Shorthand (jobs:) -- a multi-repo in-session agent review. Edit each repo path and prompt, then expand with `jobs.py expand` and run with `tick.py --init`. The subagent worker_prompt placeholders are injected on expansion (the engine substitutes absolute paths at dispatch).",
+  "pool_size": 3,
+  "tick_interval_minutes": 5,
+  "jobs": [
+    {"id": "review-a", "repo": "/path/to/repo-a", "agent": "subagent",
+     "prompt": "Review this repository for security issues and write a short summary of findings."},
+    {"id": "review-b", "repo": "/path/to/repo-b", "agent": "subagent",
+     "prompt": "Review this repository for missing or weak test coverage."},
+    {"id": "review-c", "repo": "/path/to/repo-c", "agent": "subagent",
+     "prompt": "Audit this repository's dependencies for known vulnerabilities."}
+  ]
+}

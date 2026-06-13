@@ -1,0 +1,14 @@
+{
+  "description": "A canonical low-level plan (entries:, no shorthand) -- what the engine actually consumes. The shorthand expands to exactly this shape. A subagent worker_prompt MUST carry the five placeholders the engine substitutes at dispatch.",
+  "schema_version": "1",
+  "pool_size": 1,
+  "tick_interval_minutes": 5,
+  "entries": [
+    {
+      "task_id": "canon-1",
+      "target_repo": "/path/to/repo",
+      "dispatch_mode": "subagent",
+      "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}\nHARNESS_BIN={HARNESS_BIN}\n\nDo the work in this repository, heartbeating as you go."
+    }
+  ]
+}

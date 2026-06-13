@@ -1,0 +1,10 @@
+{
+  "description": "Shorthand (jobs:) -- a mixed plan: an in-session agent review alongside a shell job. Pool 2 runs them concurrently.",
+  "pool_size": 2,
+  "jobs": [
+    {"id": "review", "repo": "/path/to/repo-a", "agent": "subagent",
+     "prompt": "Review this repository for bugs and risky patterns."},
+    {"id": "tests", "repo": "/path/to/repo-b", "adapter": "wrap",
+     "command": ["pytest", "-q", "tests/"]}
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "description": "Shorthand (jobs:) -- shell-dispatch jobs via the FR-40 wrap adapter. Each `command` is run as a child; doneness is its exit code, and its latest output line shows as the activity. No heartbeat plumbing to wire by hand.",
+  "pool_size": 2,
+  "jobs": [
+    {"id": "tests-a", "repo": "/path/to/repo-a", "adapter": "wrap",
+     "command": ["pytest", "-q"]},
+    {"id": "build-b", "repo": "/path/to/repo-b", "adapter": "wrap",
+     "command": ["make", "build"]}
+  ]
+}
