@@ -102,6 +102,22 @@ class HaltReasonClosedSet(unittest.TestCase):
             self.assertIn(r, T._CONTINUATION_REASONS)
 
 
+class InternalErrorCatchAll(unittest.TestCase):
+    """`internal_error` is a closed-set reason and must be REACHABLE: a fault
+    computing the verdict (e.g. a malformed `runs` record) routes to
+    HALT:internal_error rather than crashing the tick or escaping the set.
+    (Instr 037 — gap found by the independent FR-55 council.)"""
+
+    def test_malformed_run_record_routes_to_internal_error(self):
+        rd = Path(tempfile.mkdtemp())
+        # `runs` is not a dict -> _halt_reason raises -> _continuation's
+        # try/except routes to the catch-all that keeps the set closed.
+        cont = T._continuation(rd, {"runs": 123}, False, 1000.0, 1)
+        self.assertEqual(cont["verdict"], "HALT")
+        self.assertEqual(cont["reason"], "internal_error")
+        self.assertIn(cont["reason"], T._CONTINUATION_REASONS)
+
+
 class BlockerLifecycle(unittest.TestCase):
 
     def setUp(self):
