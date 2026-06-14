@@ -1,0 +1,26 @@
+{
+  "tick_interval_minutes": 1,
+  "pool_size": 2,
+  "stall_threshold_minutes": 45,
+  "launch_grace_minutes": 10,
+  "entries": [
+    {
+      "task_id": "review-abc",
+      "target_repo": ".",
+      "dispatch_mode": "subagent",
+      "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}\nHARNESS_BIN={HARNESS_BIN}\n\n(the contents of ABC.md) Review this repository per ABC.md and summarize findings."
+    },
+    {
+      "task_id": "review-def",
+      "target_repo": ".",
+      "dispatch_mode": "subagent",
+      "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}\nHARNESS_BIN={HARNESS_BIN}\n\n(the contents of DEF.md) Review this repository per DEF.md and summarize findings."
+    },
+    {
+      "task_id": "review-ghi",
+      "target_repo": ".",
+      "dispatch_mode": "subagent",
+      "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}\nHARNESS_BIN={HARNESS_BIN}\n\n(the contents of GHI.md) Review this repository per GHI.md and summarize findings."
+    }
+  ]
+}

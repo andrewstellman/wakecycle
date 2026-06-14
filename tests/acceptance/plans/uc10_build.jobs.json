@@ -1,0 +1,15 @@
+{
+  "description": "UC-10 conversational build (fixed NL prompt): 'Run three review jobs from ABC.md, DEF.md, GHI.md on this repo, pool 2, as subagents.' The host agent comprehends the NL (agent-self-reported) and assembles THIS shorthand; the builder expands it to the canonical plan (disk-graded against uc10_expected_plan.json) and the saved bundle re-runs faithfully.",
+  "pool_size": 2,
+  "tick_interval_minutes": 1,
+  "stall_threshold_minutes": 45,
+  "launch_grace_minutes": 10,
+  "jobs": [
+    {"id": "review-abc", "repo": ".", "agent": "subagent",
+     "prompt": "(the contents of ABC.md) Review this repository per ABC.md and summarize findings."},
+    {"id": "review-def", "repo": ".", "agent": "subagent",
+     "prompt": "(the contents of DEF.md) Review this repository per DEF.md and summarize findings."},
+    {"id": "review-ghi", "repo": ".", "agent": "subagent",
+     "prompt": "(the contents of GHI.md) Review this repository per GHI.md and summarize findings."}
+  ]
+}
