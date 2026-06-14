@@ -1,52 +1,58 @@
 # Arunner — Acceptance Tests (the runbook)
 
-*The acceptance tests mirror the use cases by having the **agent drive arunner the way it is used**, then grading the result objectively. They are run from Claude Code (and, per use case, the ticker), back to back, on each target platform and agent. The deterministic pytest/unittest suite is the necessary-condition floor underneath (see `SDLC.md`); a real regression test is the acceptance tests **and** that suite, together. This doc is the runbook an agent follows after "Read AGENTS.md, then run the acceptance tests." Status: **design — to be council-reviewed, then built.***
+*The acceptance tests mirror the use cases by having the **agent drive arunner the way it is used**, then grading the result objectively. They are run from Claude Code (and, for the no-agent cases, the ticker), back to back, on each target platform and agent. The deterministic pytest/unittest suite is the **necessary-condition floor** underneath (see `SDLC.md`); a real regression test is the acceptance tests **and** that floor, together. This doc is the runbook an agent follows after "Read AGENTS.md, then run the acceptance tests." Status: **design (council-revised 2026-06-14) — building.***
 
-## The core idea (reuse, don't reinvent)
+## Two run paths
 
-Each acceptance test reuses an existing scenario's **canned stub-worker plan** and its **`expected` end-state**, but the **agent drives the run** (rung 1, bootstrapped from `AGENTS.md`) — or launches the **ticker** for the no-agent cases — instead of the test harness's ticker loop. The run is then graded by the **same independent stdlib checker** the necessary-condition suite already uses.
+- **In-agent (rung 1)** — the agent bootstraps and drives the tick loop itself, dispatching **subagent** workers. Used for the agent-driven cases (UC-1, UC-2, UC-3, UC-4 agent leg, UC-9, UC-10, UC-11). Requires **subagent-dispatch stub plans** — *not* the shell scenarios, because a rung-1 agent handed a shell plan correctly refuses and hands off to the ticker (`SKILL.md`). The stub subagent is a trivial "emit STARTING + COMPLETED heartbeat lines and exit" prompt.
+- **Ticker / terminal (rungs 2–4)** — a real `ticker.py` invocation drives a **shell-dispatch** plan (the existing stub-worker scenarios). Used for the no-agent floor cases (UC-5, UC-6, UC-7) and the ticker leg of UC-4/UC-8.
 
-So the only difference between a necessary-condition test and its acceptance test is **who drives the run**: the harness's ticker (necessary-condition) vs. the live agent / a real ticker invocation (acceptance). Grading is identical and objective — the checker reads the run-dir and compares to `expected`; pass = no failures. No "did it look right" judgment.
+**Cost, honestly:** worker dispatch is stubs, so **zero worker API spend**. The in-agent cases still spend the agent's own tick tokens plus a trivial subagent call per job — **cheap, not free**. The ticker cases are genuinely free.
 
-Stub workers mean **zero API spend**, so the whole set runs back to back.
+## Grading (objective, from what a real run leaves on disk)
 
-## The one new piece to build
-
-A thin **checker CLI** so the agent can grade its own live run:
+A live run does not produce the test runner's private `_check_meta.json`, so grading reads the **durable artifacts a real run actually writes**: `harness_status.json` (incl. `continuation`), `journal.ndjson` (per-tick verdicts + yields), `results/`, and the heartbeat files. The checker is extended to grade from those and exposed as a CLI:
 
 ```
-python tests/integration/checker.py <run-dir> <expected.json>   # exit 0 = pass, prints failures otherwise
+python tests/integration/checker.py <run-dir> <expected.json>   # exit 0 = pass; prints failures otherwise
 ```
 
-`checker.check(run_dir, expected)` already exists and is stdlib-only; this just exposes it as a command. (Worker iteration — small.) Everything else is canned plans (already exist as the integration scenarios) + this runbook + the `AGENTS.md` bootstrap.
+For **control-timing** tests (STOP/CANCEL read-only), the pre-action state can't be reconstructed after the fact, so the runbook has the agent **snapshot the run-dir before the control action and compare after** (trivially: copy `harness_status.json`, drop the control file, tick, diff). That makes the read-only invariant gradeable in a live run without the runner's meta.
 
 ## The runbook (per use case)
 
-For each, the agent: (1) prepares the canned plan, (2) drives it at the listed rung, performing any control actions, (3) grades the run-dir with the checker CLI. The full UC↔test↔rung↔run-context matrix is in `docs/TRACEABILITY.md`; the agent-facing steps are:
+For each: prepare the plan, drive it at the listed rung performing any control actions, grade. The full UC↔rung↔floor↔run-context matrix is `docs/TRACEABILITY.md`. Agent-facing steps:
 
-- **UC-1 (multi-job native):** bootstrap rung-1 on the pool plan; tick to `done`; grade. Pass = all entries `completed`, `done: true`.
-- **UC-2 (monitor):** during UC-1, confirm each tick's status table matches `harness_status.json` (read-only).
-- **UC-3 (halt):** mid-run, drop `STOP`; confirm the next tick halts read-only (state byte-unchanged); grade `stopped`.
-- **UC-4 (resume):** mid-run, abandon the session; re-bootstrap against the run-dir (skip `--init`) or run `ticker.py --once`; confirm resume with no double-dispatch; grade `done`.
-- **UC-5 (locked-down floor):** launch `ticker.py` in a terminal (no admin) on a shell-dispatch plan; drive to `done`; grade. **Run-context: Windows + macOS.**
-- **UC-6 (scheduled):** install the printed schedule entry firing `--once`; confirm one tick per fire to `done`. **Recorded, real scheduler.**
-- **UC-7 (manual tick):** run `--once` by hand repeatedly to `done`; grade.
-- **UC-8 (demo):** from a fresh install, drive the bundled demo to `done` both in-agent and via ticker; grade.
-- **UC-9 (in-context):** bootstrap on an instruction folder; do in-context tasks + tick the background harness; simulate a drop and rehydrate; grade outputs + background run-dir.
-- **UC-10 (conversational build):** describe → preview → run → persist a session in natural language; confirm the previewed plan ran and the saved bundle re-runs faithfully.
-- **UC-11 (autonomy integrity):** drive a long stub run; confirm the continuation contract holds; run the checker's 3-class detector over the journal — pass = no `CONTINUE`-state yields.
-- **UC-12 (activity patterns):** run a wrap/tail job with `adapter_activity_patterns` over noisy sim output; confirm the ACTIVITY label shows the relevant line, not the noise.
+- **UC-1 (multi-job native):** rung-1 subagent plan; tick to `done`; grade (all `completed`, `done`).
+- **UC-2 (monitor):** rung-1; issue an on-demand "tick now" mid-run and confirm it is **idempotent** (only the cycle counter moves, no double-dispatch) — the lived monitoring affordance, not table-vs-status serialization (that's the floor's `test_cli`).
+- **UC-3 (halt):** rung-1; **snapshot**, drop `STOP`, tick, **compare** — assert the STOP tick changed nothing (read-only) and `stopped`.
+- **UC-4 (resume):** rung-1; abandon mid-run; **(a)** re-bootstrap a *fresh* session against the run-dir and **(b)** separately resume via `ticker.py --once`; both must continue with no double-dispatch. Include the **sleep/hibernate** leg (inflated heartbeat ages → wall-clock-jump guard, not a false STALL).
+- **UC-5 (locked-down floor):** launch `ticker.py` in a terminal, no admin, shell-dispatch plan → `done`. **Per-OS: Windows + macOS.**
+- **UC-6 (scheduled):** install the printed schedule entry firing `--once`; one tick per fire → `done`. **Recorded, real scheduler.**
+- **UC-7 (manual tick):** run `--once` by hand repeatedly → `done`.
+- **UC-8 (demo):** from a fresh install, drive the bundled demo to `done` **twice — rung 1 and rung 3 — against the same `expected`** (catches a rung-specific divergence).
+- **UC-9 (in-context):** bootstrap on an instruction folder; do in-context tasks + tick the background harness; **kill the session and rehydrate in a *fresh* context** — assert the **in-context queue resumes** (FR-48), not just the background run-dir; include the "busy, not asleep" long-task leg.
+- **UC-10 (conversational build):** for a **fixed** NL prompt, describe → preview → run → persist; grade the assembled plan against an **expected canonical plan** (pool/dispatch/entries), and confirm the saved bundle re-runs faithfully. The clarifying-question path is agent-self-reported, not checker-graded.
+- **UC-11 (autonomy integrity):** drive a long stub run; confirm the contract holds (no `CONTINUE`-state yields); **and** run deliberate-violation fixtures (silent abandonment / illegitimate yield / false-halt-claim) and assert the detector **fires** on each — the reason FR-55 exists.
+- **UC-12 (activity patterns):** run a wrap/tail job with `adapter_activity_patterns` over noisy output; confirm the ACTIVITY label shows the relevant line, not the noise.
+
+## Disk-gradeable vs. agent-reported
+
+Most legs are disk-objective (the checker grades the run-dir). A few legs live in agent behavior, not the run-dir, and are **agent-self-reported with evidence** rather than checker-graded: UC-2's table reading, UC-10's NL comprehension, UC-9's "did the fresh context actually rehydrate from disk." The runbook marks which is which so the pass criterion is honest.
 
 ## Running them
 
-`AGENTS.md` gets a "run the acceptance tests" section: read this runbook, run each test back to back, grade each with the checker CLI, and report a pass/fail roll-up by use case. The agent reports which use cases passed, which failed (with the checker's failure lines), and the run-context (OS + agent).
+`AGENTS.md` gets a "run the acceptance tests" section: read this runbook, run each test back to back, grade each with the checker CLI, and report a pass/fail roll-up by use case (with the checker's failure lines and the run-context: OS + agent).
 
 **Run-contexts (a test isn't complete until run in each):**
-- **Per-OS:** the platform-sensitive cases (UC-5/6/7/8) on **Windows and macOS** (Linux too) — where file-locking / process-spawn defects the floor can't see will surface.
-- **Per-agent:** the in-agent cases (UC-1/2/3/9/10/11) on **each agent claimed as an orchestrator host** — Claude Code today; Cursor and Copilot stay DESIGNED until an acceptance run on them passes and is recorded.
+- **Per-OS (Windows, macOS, Linux — co-equal, NFR-1):** the platform-sensitive cases — UC-4, UC-5, UC-6, UC-7, UC-8, UC-12 — where file-locking / process-spawn defects the floor can't see surface.
+- **Per-agent:** the in-agent cases (UC-1/2/3/9/10/11) on **each agent claimed as an orchestrator host** — Claude Code today; Cursor and Copilot stay **DESIGNED** until an acceptance run on them passes and is recorded.
+- A pass from Claude Code on macOS does **not** clear the §9 Windows floor row; that row flips only on a recorded Windows run (NFR-12).
 
-## Status / next
+## Status / next (the build)
 
-1. **Council-review this design** (does each test truly mirror its use case at the right rung; is agent-drive + checker-grade sound; are the run-contexts honest). This is the drift-check.
-2. Build: the **checker CLI**; any **canned plans** not already covered by the integration scenarios; the **`AGENTS.md` bootstrap** section.
-3. First real run: from Claude Code on macOS, then Windows — expect genuine failures the first few times (that is the suite working).
+1. **Checker extension + CLI** — grade from the durable run artifacts (journal / continuation / results / heartbeats); standalone `checker.py <run-dir> <expected.json>`.
+2. **Subagent-dispatch stub plans** for the in-agent cases + the trivial stub-subagent prompt.
+3. **Demonstrate one in-agent acceptance test end-to-end** (agent drives rung-1 on a stub plan, grades via the CLI) to prove the flow.
+4. **`AGENTS.md` bootstrap** — the "run the acceptance tests" section.
+5. Council the build; then first real runs from Claude Code on macOS, then Windows — **expect genuine failures the first few times** (that is the suite working).
