@@ -1,0 +1,23 @@
+{
+  "schema_version": "1",
+  "tick_interval_minutes": 1,
+  "pool_size": 1,
+  "stall_threshold_minutes": 45,
+  "launch_grace_minutes": 10,
+  "entries": [
+    {
+      "task_id": "act-1",
+      "target_repo": ".",
+      "dispatch_mode": "shell",
+      "adapter": "wrap",
+      "adapter_activity_patterns": [
+        "step \\d+"
+      ],
+      "command": [
+        "python3",
+        "-c",
+        "import time,sys\nfor i in range(1,7):\n    print('noise: chatter'); print('step %d' % i); sys.stdout.flush()\n    time.sleep(0.5)\n"
+      ]
+    }
+  ]
+}
