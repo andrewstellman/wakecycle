@@ -4,6 +4,38 @@
 file you need from the table, then `docs/REQUIREMENTS.md` for the spec behind
 any change.*
 
+## Rehydrate on context loss (ERR — read this first if you were summarized)
+
+If your context was summarized, truncated, compacted, or continued from a prior
+session — i.e. you are reasoning from a summary rather than the original material
+(you will usually see a system note that the conversation was continued) — then
+**before taking any action**:
+
+1. **Recognize** that your working context is now a lossy re-rendering. Summaries
+   drift toward restating *decisions* and *your own prior output*, and away from
+   the user's literal intent.
+2. **Rehydrate** from the **source of truth** — `docs/REQUIREMENTS.md` (the user
+   stories, use cases, and FR/NFR that define what arunner must do), plus any
+   file this guide's table marks canonical. Read those as ground truth; treat the
+   summary, your earlier notes, and any derived docs (plans, this guide's prose,
+   prior instructions) as suspect.
+3. **Re-ground** the task you are about to act on against the *literal text* of
+   the requirement — quote the FR/UC and check your action matches the words, not
+   your memory of them.
+4. If the source of truth and a derived artifact (or your own prior plan)
+   conflict, **stop and surface the conflict** rather than proceeding on the
+   drifted version.
+
+Do this on every context-loss event, not only when something feels wrong — drift
+is silent. (Externalize–Recognize–Rehydrate: the spec lives on disk; recognize
+the context-loss event; rehydrate from durable truth instead of the lossy
+summary. This is the same FR-48 / UC-9 discipline arunner asks of its own
+in-context agent, turned on the process that builds it.)
+
+> Portable form: to reuse this in another project's `AGENTS.md`, copy this
+> section and change only the step-2 pointer to that project's source-of-truth
+> spec.
+
 ## What this repo is
 
 A batch orchestrator for AI coding agents with an inverted architecture: all
