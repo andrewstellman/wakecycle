@@ -115,3 +115,37 @@ Run it before and after every change. Time-dependent transitions (stall,
 launch grace) are driven by a `*_NOW` epoch env override the engine reads —
 no test sleeps. Purge `__pycache__` before a post-restore re-verify so a
 stale `.pyc` can't mask a mutation restore.
+
+This suite is the **necessary-condition floor**, NOT a regression test (see
+`SDLC.md`): it checks the engine in isolation (ticker + stubs, never the agent
+loop), so it can be green while the actual use cases regress. A real regression
+test is the acceptance tests **and** this suite, together.
+
+## Running the acceptance tests
+
+The acceptance tests mirror the use cases by having **you (the agent) drive
+arunner the way an operator does**, then grading objectively. This is where
+regressions actually surface. The runbook is `docs/ACCEPTANCE_TESTS.md`; the
+US/UC↔test↔rung↔run-context matrix is `docs/TRACEABILITY.md`.
+
+Procedure — read `docs/ACCEPTANCE_TESTS.md`, then for each use case:
+
+1. Prepare its plan from `tests/acceptance/plans/`.
+2. Drive it **at its rung**: in-agent (rung 1, **subagent** dispatch) for the
+   agent-driven cases (UC-1/2/3/4/9/10/11); via `arunner/engine/ticker.py` for
+   the no-agent floor cases (UC-5/6/7). Perform any control actions the runbook
+   names (e.g. snapshot → drop `STOP` → tick → compare).
+3. Grade the run-dir:
+   ```bash
+   python tests/integration/checker.py <run-dir> <expected.json>   # exit 0 = pass
+   ```
+
+Report a pass/fail roll-up by use case, with the checker's failure lines and
+**your run-context (OS + which agent you are)**. A pass on one OS/agent does NOT
+cover another — state your context honestly; the per-OS and per-agent
+requirements are in the runbook. Worker dispatch is stubs (zero worker API
+spend); the in-agent cases still cost your own tick tokens plus a trivial
+subagent call each — cheap, not free. **Expect genuine failures the first few
+times on a new platform — that is the suite working.**
+
+This is the "Read AGENTS.md, then run the acceptance tests" entry point.
