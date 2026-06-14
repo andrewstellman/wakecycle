@@ -1,0 +1,92 @@
+{
+  "description": "FR-55 blocked_then_clear: host records a blocker after tick 2 (verdict => HALT:blocked at tick 3), yields citing HALT:blocked (matches), then clears the blocker and resumes to done. Detector silent; the blocker round-trips.",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 1,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "cc-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub cc-1",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.1"
+        ]
+      },
+      {
+        "task_id": "cc-2",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub cc-2",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.1"
+        ]
+      },
+      {
+        "task_id": "cc-3",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub cc-3",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.1"
+        ]
+      }
+    ]
+  },
+  "control": {
+    "block_after_tick": 2,
+    "stop_host_after_tick": 3,
+    "yield_cited": "HALT:blocked",
+    "clear_block_after_tick": 3,
+    "resume_after_stop": true
+  },
+  "expected": {
+    "done": true,
+    "counts": {
+      "completed": 3
+    },
+    "continuation": {
+      "violations": [],
+      "verdict_present": [
+        "HALT:blocked"
+      ],
+      "final_done": true
+    }
+  }
+}

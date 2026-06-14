@@ -32,6 +32,13 @@ _STUB = _HERE / "stub_worker.py"
 _MAX_TICKS = 60
 
 
+def _verdict_str(cont):
+    """Canonical verdict string from a continuation object (FR-55)."""
+    if not cont or cont.get("verdict") == "CONTINUE":
+        return "CONTINUE"
+    return "HALT:" + str(cont.get("reason", "internal_error"))
+
+
 def _substitute(obj, mapping):
     if isinstance(obj, str):
         for k, v in mapping.items():
@@ -158,11 +165,26 @@ def run_scenario(scenario_dir, work_dir):
     cancel_value = control.get("cancel_value")
     max_ticks = int(control.get("max_ticks", _MAX_TICKS))
 
+    # FR-55 stub-host knobs: the runner stands in for the LLM orchestrator. These
+    # make it STOP driving on command and optionally write a yield/blocker —
+    # categorically different from the control-file knobs (which write a file the
+    # ENGINE reacts to); these script the HOST's behaviour.
+    stop_host_after = control.get("stop_host_after_tick")
+    yield_cited = control.get("yield_cited")          # None ⇒ no yield (abandon)
+    resume_after_stop = bool(control.get("resume_after_stop"))
+    past_due = bool(control.get("past_due"))           # eval_now past next_tick_due?
+    block_after = control.get("block_after_tick")
+    clear_block_after = control.get("clear_block_after_tick")
+    cadence_secs = int((plan.get("tick_interval_minutes") or 1)) * 60
+
     run_dir = None
     trace = []
     pre_stop = None
     stopped = False
     results_snapshot = None       # FR-39: results/ bytes captured just before CANCEL
+    host_stopped_after = None     # FR-55: the tick after which the host went away
+    resumed = False               # FR-55: did the host resume (FR-13) after stopping?
+    eval_now = None               # FR-55: wall-clock at which abandonment is judged
     for tick_no in range(1, max_ticks + 1):
         target = str(plan_path) if run_dir is None else str(run_dir)
         subprocess.run([sys.executable, str(_TICKER), "--once", target],
@@ -175,9 +197,14 @@ def run_scenario(scenario_dir, work_dir):
         status = _read_status(run_dir)
         if status is None:
             continue
+        cont = status.get("continuation") or {}
         trace.append({"counts": dict(status.get("counts", {})),
                       "paused": bool(status.get("paused")),
-                      "next_tick_minutes": status.get("next_tick_minutes")})
+                      "next_tick_minutes": status.get("next_tick_minutes"),
+                      # FR-55: the engine's per-tick verdict (canonical string)
+                      # + when the next tick is due, for the abandonment detector
+                      "verdict": _verdict_str(cont),
+                      "next_tick_due": cont.get("next_tick_due")})
 
         # drop control files at the scenario's scripted tick boundaries.
         # Value-carrying controls (FR-37) write the value into the file BODY.
@@ -204,6 +231,38 @@ def run_scenario(scenario_dir, work_dir):
             (run_dir / "STOP").touch()
             stopped = True
 
+        # FR-55 stub-host scripting (a HOST-authored blocker; the engine only
+        # READS blockers, so this is the operator/host writing one to disk).
+        if block_after == tick_no:
+            bdir = run_dir / "blockers"
+            bdir.mkdir(exist_ok=True)
+            (bdir / "b1.json").write_text(json.dumps(
+                {"id": "b1", "created_at": "t0", "reason": "operator decision",
+                 "cleared_at": None}), encoding="utf-8")
+        if clear_block_after == tick_no:
+            bf = run_dir / "blockers" / "b1.json"
+            if bf.exists():
+                obj = json.loads(bf.read_text(encoding="utf-8"))
+                obj["cleared_at"] = "t9"
+                bf.write_text(json.dumps(obj), encoding="utf-8")
+        # FR-55: the host goes away after tick N. Record it; optionally write a
+        # yield (a host-authored journal record citing the verdict it claims to
+        # have observed); compute the eval-now for the abandonment judgement.
+        if stop_host_after == tick_no:
+            host_stopped_after = tick_no
+            due = trace[-1].get("next_tick_due")
+            if due is not None:
+                eval_now = (due + cadence_secs + 60) if past_due else (due - 60)
+            if yield_cited is not None:
+                with (run_dir / "journal.ndjson").open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(
+                        {"ts": "host", "tick": status.get("cycle", tick_no),
+                         "type": "yield", "cited_verdict": yield_cited,
+                         "note": scn.get("description", "")}) + "\n")
+            if not resume_after_stop:
+                break                            # host vanished; stop driving
+            resumed = True                       # host resumed (FR-13)
+
         # Deterministic settle (FR-51): before the NEXT scripted tick reaps
         # them, wait on disk truth for every dispatched non-held worker to
         # write its terminal heartbeat -- so the regression net observes
@@ -213,13 +272,25 @@ def run_scenario(scenario_dir, work_dir):
         _settle(run_dir, plan.get("entries", []))
 
         if status.get("done"):
+            # FR-55 `honor`: the host yields legitimately at the done tick.
+            if yield_cited is not None and stop_host_after is None:
+                with (run_dir / "journal.ndjson").open("a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(
+                        {"ts": "host", "tick": status.get("cycle", tick_no),
+                         "type": "yield", "cited_verdict": yield_cited,
+                         "note": scn.get("description", "")}) + "\n")
             break
         # a stop tick is read-only; one tick after STOP is written is enough
         if stopped and stop_after is not None and tick_no >= stop_after + 1:
             break
 
+    final_status = _read_status(run_dir) or {}
     meta = {"tick_trace": trace, "pre_stop_status": pre_stop,
-            "stopped": stopped, "results_snapshot": results_snapshot}
+            "stopped": stopped, "results_snapshot": results_snapshot,
+            # FR-55 continuation-contract metadata for the detector
+            "host_stopped_after_tick": host_stopped_after,
+            "resumed": resumed, "eval_now": eval_now,
+            "final_done": bool(final_status.get("done"))}
     (run_dir / "_check_meta.json").write_text(json.dumps(meta), encoding="utf-8")
     _kill_workers(run_dir)
     return run_dir

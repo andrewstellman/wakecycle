@@ -1,0 +1,88 @@
+{
+  "description": "FR-55 abandon (the literal incident): host stops after tick 2 at CONTINUE, past next_tick_due, never resumes, no yield. Detector fires silent_abandonment.",
+  "plan": {
+    "schema_version": "1",
+    "tick_interval_minutes": 1,
+    "pool_size": 1,
+    "stall_threshold_minutes": 45,
+    "launch_grace_minutes": 10,
+    "entries": [
+      {
+        "task_id": "cc-1",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub cc-1",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.1"
+        ]
+      },
+      {
+        "task_id": "cc-2",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub cc-2",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.1"
+        ]
+      },
+      {
+        "task_id": "cc-3",
+        "target_repo": "{SCENARIO_DIR}",
+        "dispatch_mode": "shell",
+        "worker_prompt": "stub cc-3",
+        "worker_cmd": [
+          "python3",
+          "{STUB}",
+          "--heartbeat",
+          "{HEARTBEAT_PATH}",
+          "--task-id",
+          "{TASK_ID}",
+          "--run-dir",
+          "{RUN_DIR}",
+          "--steps",
+          "1",
+          "--sleep",
+          "0.1"
+        ]
+      }
+    ]
+  },
+  "control": {
+    "stop_host_after_tick": 2,
+    "past_due": true
+  },
+  "expected": {
+    "done": false,
+    "continuation": {
+      "violations": [
+        "silent_abandonment"
+      ],
+      "verdict_present": [
+        "CONTINUE"
+      ],
+      "final_done": false
+    }
+  }
+}

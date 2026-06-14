@@ -69,6 +69,30 @@ class IntegrationScenarioTests(unittest.TestCase):
             self.assertIn("--check", str(cm.exception))
             self.assertIn("dispatch_mode", str(cm.exception))
 
+    def test_continuation_detector_discriminates(self):
+        # FR-55: the abandonment detector must genuinely FIRE on a real
+        # violation and STAY SILENT on an honest run -- not rubber-stamp the
+        # scenario's own `expected`. Run `abandon`, then re-grade against a
+        # wrong expected (no violation) -> must fail; run `honor`, then grade
+        # it claiming a violation -> must fail.
+        ab = _INT / "scenarios" / "continuation_abandon"
+        with tempfile.TemporaryDirectory() as d:
+            run_dir = RUNNER.run_scenario(ab, d)
+            real = json.loads((ab / "scenario.json").read_text())["expected"]
+            self.assertEqual(CHECKER.check(run_dir, real), [])     # truly green
+            wrong = copy.deepcopy(real)
+            wrong["continuation"]["violations"] = []               # claim no abandon
+            self.assertTrue(CHECKER.check(run_dir, wrong),
+                            "detector missed a real silent abandonment")
+        ho = _INT / "scenarios" / "continuation_honor"
+        with tempfile.TemporaryDirectory() as d:
+            run_dir = RUNNER.run_scenario(ho, d)
+            wrong = copy.deepcopy(
+                json.loads((ho / "scenario.json").read_text())["expected"])
+            wrong["continuation"]["violations"] = ["silent_abandonment"]
+            self.assertTrue(CHECKER.check(run_dir, wrong),
+                            "detector flagged an honest honored run")
+
     def test_checker_distinguishes_pass_from_fail(self):
         # Run a real scenario, then check it against a DELIBERATELY-WRONG
         # expected -- the checker must report failures (it can fail, not just

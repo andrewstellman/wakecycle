@@ -22,6 +22,83 @@ def _load(path):
         return json.load(fh)
 
 
+# FR-55: the closed halt set (kept in lockstep with tick._CONTINUATION_REASONS;
+# duplicated here on purpose -- the checker imports NO repo code).
+_HALT_REASONS = frozenset((
+    "done", "failed", "stop", "pause", "cancel", "blocked",
+    "stalled", "budget", "internal_error"))
+
+
+def _cited_in_set(v):
+    """True iff a yield's cited_verdict is a member of the verdict vocabulary
+    (CONTINUE or HALT:<reason-in-closed-set>)."""
+    if v == "CONTINUE":
+        return True
+    if isinstance(v, str) and v.startswith("HALT:"):
+        return v[len("HALT:"):] in _HALT_REASONS
+    return False
+
+
+def _detect_violations(run_dir, meta):
+    """FR-55 abandonment detector -- three classes, all read from disk alone:
+    (i) silent abandonment, (ii) illegitimate yield, (iii) false halt claim.
+    Cross-checks each host yield's cited_verdict against the engine's ACTUAL
+    recorded verdict for that tick -- the yield's honesty is verified against
+    ground truth, never trusted."""
+    journal = []
+    jp = os.path.join(run_dir, "journal.ndjson")
+    if os.path.isfile(jp):
+        with open(jp, "r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    journal.append(json.loads(ln))
+                except ValueError:
+                    pass
+    engine_verdict_by_tick = {}
+    yields = []
+    for e in journal:
+        if e.get("type") == "verdict":
+            engine_verdict_by_tick[e.get("tick")] = e.get("verdict")
+        elif e.get("type") == "yield":
+            yields.append(e)
+
+    trace = meta.get("tick_trace") or []
+    host_stop = meta.get("host_stopped_after_tick")
+    resumed = bool(meta.get("resumed"))
+    eval_now = meta.get("eval_now")
+    final_done = bool(meta.get("final_done"))
+    viols = set()
+
+    for y in yields:
+        cv = y.get("cited_verdict")
+        if not _cited_in_set(cv):
+            # (ii) a yield citing a reason outside the closed halt set
+            viols.add("illegitimate_yield")
+        else:
+            # (iii) an in-set claim that does NOT match the engine's actual
+            # verdict for that tick (e.g. cites HALT:done while it was CONTINUE)
+            actual = engine_verdict_by_tick.get(y.get("tick"))
+            if actual is not None and cv != actual:
+                viols.add("false_halt_claim")
+
+    # (i) silent abandonment: the host stopped while the verdict was CONTINUE,
+    # never resumed, wrote no yield, the run never finished, and wall-clock is
+    # past next_tick_due by more than a cadence-interval tolerance.
+    if host_stop is not None and not resumed and not yields and not final_done:
+        idx = host_stop - 1
+        stop_entry = trace[idx] if 0 <= idx < len(trace) else None
+        if stop_entry and stop_entry.get("verdict") == "CONTINUE":
+            due = stop_entry.get("next_tick_due")
+            tol = int((stop_entry.get("next_tick_minutes") or 1)) * 60
+            if (due is not None and eval_now is not None
+                    and eval_now > due + tol):
+                viols.add("silent_abandonment")
+    return sorted(viols)
+
+
 def check(run_dir, expected):
     fails = []
     run_dir = str(run_dir)
@@ -165,4 +242,24 @@ def check(run_dir, expected):
                 if not os.path.isfile(rp):
                     fails.append("terminal run %s (%s) has no results record"
                                  % (run, r.get("state")))
+
+    # 8. FR-55 continuation contract: the abandonment detector must fire on its
+    # violation configs and stay silent on the honest ones; verdict-fidelity
+    # asserts the per-tick verdict value against known state.
+    cont_exp = expected.get("continuation")
+    if cont_exp is not None:
+        got = _detect_violations(run_dir, meta)
+        want = sorted(set(cont_exp.get("violations", [])))
+        if got != want:
+            fails.append("continuation violations: expected %r, got %r"
+                         % (want, got))
+        trace_verdicts = [t.get("verdict") for t in (meta.get("tick_trace") or [])]
+        for v in cont_exp.get("verdict_present", []):
+            if v not in trace_verdicts:
+                fails.append("verdict-fidelity: expected %r somewhere in the "
+                             "trace, got %r" % (v, trace_verdicts))
+        if ("final_done" in cont_exp
+                and bool(meta.get("final_done")) != bool(cont_exp["final_done"])):
+            fails.append("continuation final_done: expected %r, got %r"
+                         % (cont_exp["final_done"], meta.get("final_done")))
     return fails
