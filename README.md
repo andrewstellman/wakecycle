@@ -183,6 +183,13 @@ Per NFR-12, every claim is labeled **VERIFIED** (evidence behind it) or
 **DESIGNED** (built and unit-tested, but no end-to-end host run yet). Don't
 trust a DESIGNED cell as if it were proven.
 
+> **CI** ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs the full
+> stdlib-only suite + the smoke gate on Linux / macOS / Windows × Python
+> 3.10–3.13; a green matrix is required for a release. This wires the gate — it
+> does **not** by itself claim Windows is verified: the cadence/Windows floor
+> row stays DESIGNED/PENDING until a green matrix run is actually observed and
+> recorded.
+
 A host can play **two distinct roles**, verified separately: (i) as a detached
 **worker** — a `worker_cmd` agent CLI the engine launches and reaps (Copilot and
 Codex are VERIFIED here, macOS, rung 3, V-14); and (ii) as the builder-driving
