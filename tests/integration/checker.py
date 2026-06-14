@@ -10,6 +10,27 @@ a plain-Python read of the disk artifacts the run left behind
 
 ``check(run_dir, expected)`` returns a list of human-readable failure strings
 (empty == PASS), so a caller can assert ``not failures``.
+
+ACCEPTANCE LAYER (instr 041): grading is ADDITIVE. Where the runner's
+``_check_meta.json`` exists (the deterministic suite), it is used; for a LIVE
+agent-driven run that has no such meta, the same verdict is reached from the
+DURABLE artifacts a real run writes:
+  * disk-gradeable alone   -> ``done``, ``counts``, ``run_states``, ``paused``,
+                              ``summary_present``, ``results_for_terminal``,
+                              ``stopped`` (the STOP file on disk), and the
+                              continuation ``verdict_present``/``final_done``
+                              (from ``journal.ndjson`` + ``harness_status.json``).
+  * needs a before-snapshot -> ``stop_readonly`` (UC-3): the agent copies
+                              ``harness_status.json`` to ``_before_snapshot.json``
+                              before the control action; the checker compares.
+  * needs the runner meta   -> ``max_inflight_*`` (per-tick trace),
+                              ``min/max_next_cadence``, ``byte_identical_results``
+                              (pre-CANCEL snapshot), and the continuation
+                              ``violations`` detector (host-stop/eval-now state) --
+                              flagged, not silently passed, when meta is absent.
+
+CLI: ``python tests/integration/checker.py <run-dir> <expected.json>`` -- exit 0
+on pass; prints the failure lines and exits 1 otherwise.
 """
 from __future__ import annotations
 
@@ -107,17 +128,31 @@ def check(run_dir, expected):
         return ["no harness_status.json in %s" % run_dir]
     status = _load(status_path)
     meta_path = os.path.join(run_dir, "_check_meta.json")
-    meta = _load(meta_path) if os.path.isfile(meta_path) else {}
+    has_meta = os.path.isfile(meta_path)       # only the TEST RUNNER writes this
+    meta = _load(meta_path) if has_meta else {}
 
-    # 1. done flag
+    # FR-51 / acceptance layer (instr 041): grade ADDITIVELY -- prefer the
+    # runner's _check_meta.json where it exists (the 257 deterministic suite),
+    # else grade from the DURABLE artifacts a real live run actually leaves on
+    # disk (harness_status.json incl. continuation, journal.ndjson, results/,
+    # heartbeats). A few keys need state that can't be reconstructed after the
+    # fact (the per-tick trace, the pre-control snapshot): those fall back to a
+    # journal read or an agent-provided before-snapshot, or are flagged as
+    # requiring the runner meta. (See the per-key notes below + ACCEPTANCE_TESTS.md.)
+
+    # 1. done flag  [durable: harness_status.json]
     if "done" in expected and bool(status.get("done")) != bool(expected["done"]):
         fails.append("done: expected %r, got %r"
                      % (expected["done"], status.get("done")))
 
-    # 2. stopped (the run halted on a STOP file) -- from the runner's meta
-    if "stopped" in expected and bool(meta.get("stopped")) != bool(expected["stopped"]):
-        fails.append("stopped: expected %r, got %r"
-                     % (expected["stopped"], meta.get("stopped")))
+    # 2. stopped (the run halted on a STOP file).  [meta if present; else durable:
+    # a real run leaves the STOP file on disk]
+    if "stopped" in expected:
+        got_stopped = (meta.get("stopped") if has_meta
+                       else os.path.isfile(os.path.join(run_dir, "STOP")))
+        if bool(got_stopped) != bool(expected["stopped"]):
+            fails.append("stopped: expected %r, got %r"
+                         % (expected["stopped"], got_stopped))
 
     # 2b. paused (FR-36) -- persisted in harness_status.json
     if "paused" in expected and bool(status.get("paused")) != bool(expected["paused"]):
@@ -142,6 +177,10 @@ def check(run_dir, expected):
     # (staggered dispatch). _ge: in-flight REACHED at least N at some tick
     # (e.g. a POOL raise back-filling dispatch up to the new pool, FR-37).
     if "max_inflight_le" in expected or "max_inflight_ge" in expected:
+        if not has_meta:
+            fails.append("max_inflight_*: requires the runner's per-tick trace "
+                         "(_check_meta.json) — not gradeable from durable "
+                         "artifacts alone")
         worst = 0
         for t in (meta.get("tick_trace") or []):
             c = t.get("counts", t)               # trace item carries {counts, paused}
@@ -213,11 +252,22 @@ def check(run_dir, expected):
                 fails.append("summary.json job states %r != run states %r"
                              % (sj_states, st_states))
 
-    # 6. STOP read-only: the stop tick changed NOTHING (not even cycle)
+    # 6. STOP read-only: the stop tick changed NOTHING (not even cycle).
+    # Meta carries the pre-STOP snapshot for the runner suite; a LIVE run can't
+    # reconstruct it after the fact, so the agent/operator snapshots
+    # harness_status.json BEFORE dropping STOP to `<run-dir>/_before_snapshot.json`
+    # (or names it in expected["before_snapshot"]) and the checker compares
+    # against that (UC-3 runbook).
     if expected.get("stop_readonly"):
-        pre = meta.get("pre_stop_status")
+        pre = meta.get("pre_stop_status") if has_meta else None
+        if pre is None:
+            snap_path = expected.get("before_snapshot") or os.path.join(
+                run_dir, "_before_snapshot.json")
+            if os.path.isfile(snap_path):
+                pre = _load(snap_path)
         if not pre:
-            fails.append("stop_readonly asserted but no pre-STOP snapshot recorded")
+            fails.append("stop_readonly asserted but no pre-STOP snapshot found "
+                         "(runner meta or <run-dir>/_before_snapshot.json)")
         else:
             if pre.get("cycle") != status.get("cycle"):
                 fails.append("stop tick changed cycle: %r -> %r"
@@ -253,13 +303,68 @@ def check(run_dir, expected):
         if got != want:
             fails.append("continuation violations: expected %r, got %r"
                          % (want, got))
-        trace_verdicts = [t.get("verdict") for t in (meta.get("tick_trace") or [])]
+        # verdicts: the runner trace if present, else the DURABLE journal lines
+        if has_meta:
+            trace_verdicts = [t.get("verdict") for t in (meta.get("tick_trace") or [])]
+        else:
+            trace_verdicts = [e.get("verdict")
+                              for e in _read_journal(run_dir)
+                              if e.get("type") == "verdict"]
         for v in cont_exp.get("verdict_present", []):
             if v not in trace_verdicts:
                 fails.append("verdict-fidelity: expected %r somewhere in the "
-                             "trace, got %r" % (v, trace_verdicts))
-        if ("final_done" in cont_exp
-                and bool(meta.get("final_done")) != bool(cont_exp["final_done"])):
-            fails.append("continuation final_done: expected %r, got %r"
-                         % (cont_exp["final_done"], meta.get("final_done")))
+                             "verdicts, got %r" % (v, trace_verdicts))
+        if "final_done" in cont_exp:
+            got_done = meta.get("final_done") if has_meta else status.get("done")
+            if bool(got_done) != bool(cont_exp["final_done"]):
+                fails.append("continuation final_done: expected %r, got %r"
+                             % (cont_exp["final_done"], got_done))
     return fails
+
+
+def _read_journal(run_dir):
+    """The durable per-tick verdict + yield log (journal.ndjson) — stdlib read."""
+    out = []
+    jp = os.path.join(str(run_dir), "journal.ndjson")
+    if os.path.isfile(jp):
+        with open(jp, "r", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    out.append(json.loads(ln))
+                except ValueError:
+                    pass
+    return out
+
+
+def main(argv=None):
+    """CLI (instr 041): ``checker.py <run-dir> <expected.json>`` -- grade a real
+    run's durable artifacts; exit 0 on pass, print the failure lines + exit 1
+    otherwise. Lets an agent grade an acceptance run objectively, no pytest."""
+    import sys
+    args = list(sys.argv[1:] if argv is None else argv)
+    if len(args) != 2:
+        print("usage: python tests/integration/checker.py <run-dir> <expected.json>",
+              file=sys.stderr)
+        return 2
+    run_dir, expected_path = args
+    if not os.path.isdir(run_dir):
+        print("checker: not a run-dir: %s" % run_dir, file=sys.stderr)
+        return 2
+    with open(expected_path, "r", encoding="utf-8") as fh:
+        expected = json.load(fh)
+    failures = check(run_dir, expected)
+    if failures:
+        print("CHECK FAILED (%d):" % len(failures))
+        for f in failures:
+            print("  - %s" % f)
+        return 1
+    print("CHECK PASSED: %s" % run_dir)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
