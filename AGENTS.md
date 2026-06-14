@@ -134,8 +134,13 @@ Procedure — read `docs/ACCEPTANCE_TESTS.md`, then for each use case:
 2. Drive it **at its rung**: in-agent (rung 1, **subagent** dispatch) for the
    agent-driven cases (UC-1/2/3/4/9/10/11); via `arunner/engine/ticker.py` for
    the no-agent floor cases (UC-5/6/7). Perform any control actions the runbook
-   names (e.g. snapshot → drop `STOP` → tick → compare).
-3. Grade the run-dir:
+   names (e.g. snapshot → drop `STOP` → tick → compare). **Run each tick so its
+   status table PRINTS VERBATIM — do NOT capture engine output into a variable
+   or suppress it (no `R=$(…)`, no `2>/dev/null`).** The operator watches the
+   per-tick `RUN / STATE / ACTIVITY / LAST-HB` table; for UC-1/UC-2 that
+   streaming table *is* the use case. Capturing-and-checking silently fails it.
+3. Grade the run-dir **with the checker CLI** (do not substitute your own read
+   of `harness_status.json`):
    ```bash
    python tests/integration/checker.py <run-dir> <expected.json>   # exit 0 = pass
    ```

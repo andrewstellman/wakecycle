@@ -21,7 +21,14 @@ For **control-timing** tests (STOP/CANCEL read-only), the pre-action state can't
 
 ## The runbook (per use case)
 
-For each: prepare the plan, drive it at the listed rung performing any control actions, grade. The full UC↔rung↔floor↔run-context matrix is `docs/TRACEABILITY.md`. Agent-facing steps:
+For each: prepare the plan, drive it at the listed rung performing any control actions, grade. The full UC↔rung↔floor↔run-context matrix is `docs/TRACEABILITY.md`.
+
+**Two non-negotiable execution rules (a capable agent will otherwise shortcut both — observed 2026-06-14):**
+
+1. **Surface the table — drive like an operator, not a grader.** Run each tick so its **status table prints verbatim**. Do NOT capture the engine's stdout into a variable or suppress it (no `R=$(… tick.py …)`, no `2>/dev/null`). The operator watches the per-tick `RUN / STATE / ACTIVITY / LAST-HB` table — for UC-1/UC-2 that streaming table *is* the use case. A run that silently captures-and-checks has graded the disk but skipped the lived experience the test exists to verify.
+2. **Grade with the checker CLI, not by eyeballing the status JSON.** Use `python tests/integration/checker.py <run-dir> <expected.json>` (exit 0 = pass) for every objective verdict — do not substitute your own read of `harness_status.json`.
+
+Agent-facing steps:
 
 - **UC-1 (multi-job native):** rung-1 subagent plan; tick to `done`; grade (all `completed`, `done`).
 - **UC-2 (monitor):** rung-1; issue an on-demand "tick now" mid-run and confirm it is **idempotent** (only the cycle counter moves, no double-dispatch) — the lived monitoring affordance, not table-vs-status serialization (that's the floor's `test_cli`).
