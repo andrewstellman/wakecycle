@@ -57,16 +57,20 @@ malformed line is skipped with a warning, never fatal. (FR-18, FR-19)
 Install at user level (no admin):
 
 ```bash
-pip install --user arunner      # Python 3.10+
+pipx install arunner            # Python 3.10+ (recommended)
 # or
+pip install --user arunner
+# or, secondary channel — a thin launcher that execs the Python CLI:
 npm install arunner
 ```
 
-> **0.0.1 is a name reservation.** Installing today gives you the `arunner`
-> placeholder command; the harness itself runs from this repo via
-> `python3 bin/tick.py`, `python3 bin/ticker.py`, and `python3 bin/heartbeat.py`.
-> The `arunner` / `arunner-ticker` / `arunner-heartbeat` console commands
-> wire up at v0.1.0; the examples below use those names.
+> **v0.1.0 installs three real console commands:** `arunner` (the lifecycle CLI —
+> `run`/`status`/`stop`/`resume`/`summary`/`preview`/`expand`), `arunner-ticker`
+> (the foreground/`--once` driver), and `arunner-heartbeat` (the worker helper).
+> pip/pipx is the primary channel; the npm package only installs a thin Node
+> launcher that execs the Python CLI. From a source checkout the engine modules
+> are at `python3 arunner/engine/tick.py` / `ticker.py` / `heartbeat.py`, or
+> drive the CLI with `python -m arunner <verb>`.
 
 The package ships an **example plan with cross-platform Python stub
 workers** — they do no real work and spend nothing; they just walk the

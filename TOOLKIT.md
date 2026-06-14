@@ -43,11 +43,12 @@ pip install --user arunner      # Python 3.10+
 npm install arunner
 ```
 
-> **At 0.0.1 the package is a name reservation** — installing gives the
-> `arunner` placeholder command. Run the harness from this repo today with
-> `python3 bin/tick.py` / `bin/ticker.py` / `bin/heartbeat.py`; the
-> `arunner-ticker` / `arunner-heartbeat` console commands wire up at v0.1.0
-> (this manual uses those names).
+> **v0.1.0 installs real console commands** — `pipx install arunner` (primary)
+> gives you `arunner` (the lifecycle CLI), `arunner-ticker`, and
+> `arunner-heartbeat`; this manual uses those names. From a source checkout the
+> engine modules are at `python3 arunner/engine/tick.py` / `ticker.py` /
+> `heartbeat.py`, or drive the CLI with `python -m arunner <verb>`. The npm
+> package is a secondary thin launcher that execs the Python CLI.
 
 Nothing needs root. The only requirements are user-level Python 3.10+ and, if
 your workers are AI agents, a host CLI (Claude Code, Codex, Copilot, …) on
@@ -96,8 +97,8 @@ tokens verbatim.
 then `--check` before launching:
 
 ```bash
-python3 bin/jobs.py expand my_jobs.json > plan.json   # shorthand -> canonical
-python3 bin/tick.py --check plan.json                  # validate -- fix every problem it lists
+python3 arunner/engine/jobs.py expand my_jobs.json > plan.json   # shorthand -> canonical
+python3 arunner/engine/tick.py --check plan.json                  # validate -- fix every problem it lists
 ```
 
 `--check` reports **all** problems at once (missing fields, a bad
@@ -183,7 +184,7 @@ to the job.
 ## The `jobs:` shorthand (the quick form)
 
 Most plans don't need the full entry shape. The **`jobs:` shorthand** is a
-higher-level form the expander (`bin/jobs.py`) turns into the canonical
+higher-level form the expander (`arunner/engine/jobs.py`) turns into the canonical
 `plan.json` — injecting the placeholders and adapter plumbing so the result
 passes `--check`. The engine only ever sees the expanded plan; the shorthand is
 pure convenience (the low-level schema stays canonical).
@@ -199,7 +200,7 @@ Each job in `jobs:` is one of:
 
 Top-level knobs (`pool_size`, `tick_interval_minutes`, …) sit beside `jobs:` and
 pass through. Add an `"id"` to a job to set its `task_id` (else `job-NN`).
-Expand with `python3 bin/jobs.py expand my_jobs.json > plan.json`. Ready-to-edit
+Expand with `python3 arunner/engine/jobs.py expand my_jobs.json > plan.json`. Ready-to-edit
 templates live in **`examples/`** (`agent_review`, `shell_jobs`, `mixed`,
 `wrap_vs_tail`, plus a `canonical_plan`); each one expands to a `--check`-clean
 plan.
@@ -224,7 +225,7 @@ the `adapter` field on a `shell` entry — you never wire it by hand.)
 
 ## Pre-flight: always `--check` before launching
 
-`python3 bin/tick.py --check <plan>` validates a plan **before** you spend
+`python3 arunner/engine/tick.py --check <plan>` validates a plan **before** you spend
 anything — schema, required placeholders, `target_repo` existence, the adapter
 config — and reports every problem at once. Make it a habit: **expand →
 `--check` → `--init` → run.** A reactive `LAUNCH-FAIL` after spend is exactly
@@ -472,14 +473,14 @@ two subagent reviews + one wrapped shell command, no placeholders typed by hand:
 }
 ```
 
-**Expand it.** `python3 bin/jobs.py expand examples/toolkit_walkthrough.jobs.json`
+**Expand it.** `python3 arunner/engine/jobs.py expand examples/toolkit_walkthrough.jobs.json`
 produces the canonical plan: each subagent job becomes an entry whose
 `worker_prompt` carries the injected placeholder header
 (`HEARTBEAT_PATH={HEARTBEAT_PATH}` … `HARNESS_BIN={HARNESS_BIN}`) followed by
 the prompt; the `wrap` job becomes a `shell` entry with `adapter: "wrap"` and
 the command — the engine synthesizes its `heartbeat.py wrap …` invocation.
 
-**Pre-flight.** `python3 bin/tick.py --check plan.json`, once the repo paths
+**Pre-flight.** `python3 arunner/engine/tick.py --check plan.json`, once the repo paths
 point at real directories, prints:
 
 ```

@@ -18,10 +18,10 @@ Python 3.10+.
 
 | File (current path) | Role | When to read |
 |---|---|---|
-| `bin/tick.py` | **The tick engine.** The whole state machine: `--init` scaffolds a run-dir; `<run-dir>` runs one idempotent tick and prints `{dispatch_list, status_table, next_tick_minutes, done, stop}`. | Before ANY change to run state, dispatch, stall/launch logic, the status table, or placeholders. This is the heart. |
-| `bin/ticker.py` | **The ticker** — foreground/`--once` driver for cadence rungs 3–4 (the no-admin floor). Spawns shell workers detached, records PIDs, prints the table, sleeps/loops or exits. | When touching cadence below rung 1, detached spawning, or the printed-command floor (FR-25). |
-| `bin/heartbeat.py` | **The heartbeat helper** — the optional convenience SDK workers use to append v2 (`label`/`data`) heartbeat lines (`emit`/`keepalive`/`terminal`). Payload-agnostic, stdlib, the part that defines the worker contract. | When touching the heartbeat line format, the helper CLI, or E6 (loud write-failure). |
-| `bin/demo_worker.py` | **The demo stub worker** — cross-platform, zero-API; walks the heartbeat lifecycle so the example plan runs identically everywhere (UC-8). | When touching the demo, or as the reference for "what a conformant worker does." |
+| `arunner/engine/tick.py` | **The tick engine.** The whole state machine: `--init` scaffolds a run-dir; `<run-dir>` runs one idempotent tick and prints `{dispatch_list, status_table, next_tick_minutes, done, stop}`. | Before ANY change to run state, dispatch, stall/launch logic, the status table, or placeholders. This is the heart. |
+| `arunner/engine/ticker.py` | **The ticker** — foreground/`--once` driver for cadence rungs 3–4 (the no-admin floor). Spawns shell workers detached, records PIDs, prints the table, sleeps/loops or exits. | When touching cadence below rung 1, detached spawning, or the printed-command floor (FR-25). |
+| `arunner/engine/heartbeat.py` | **The heartbeat helper** — the optional convenience SDK workers use to append v2 (`label`/`data`) heartbeat lines (`emit`/`keepalive`/`terminal`). Payload-agnostic, stdlib, the part that defines the worker contract. | When touching the heartbeat line format, the helper CLI, or E6 (loud write-failure). |
+| `arunner/engine/demo_worker.py` | **The demo stub worker** — cross-platform, zero-API; walks the heartbeat lifecycle so the example plan runs identically everywhere (UC-8). | When touching the demo, or as the reference for "what a conformant worker does." |
 | `plugins/arunner/skills/arunner/SKILL.md` | The orchestrator agent's per-tick instructions (cadence rung 1) + the capability-ladder probe/announce/degrade prose + the worker contract. | When changing what the agent does per tick, or the ladder. |
 | `references/BOOTSTRAP_PROMPT.md` | The paste-once prompt that turns a fresh agent session into the orchestrator. Deliberately restates the per-tick sequence (carried a low-reasoning model to a clean pass). | When changing the operator's rung-1 entry experience. |
 | `references/STATE_MACHINE.md` | The canonical state-machine reference: states, transitions, idempotency, STOP/orphan semantics, shell dispatch, PID locks, E1/E2, schema v2, Postel, FR-21a/21b. | The companion to the engine — read alongside it. |
@@ -29,9 +29,11 @@ Python 3.10+.
 | `references/examples/` | The example plan (Python stub workers) — the ~minutes, zero-API demo. | When touching the demo or onboarding. |
 | `tests/` | The suite: `test_tick.py` (engine), `test_heartbeat.py` (helper), `test_ticker.py` (ticker), `test_schemas.py` (schema byte-identity), `test_windows_readiness.py` (cross-platform + ASCII sweeps). | Before and after every change. |
 
-> The `bin/` scripts are the arunner package's console entry points
-> (`arunner`, `arunner-ticker`, `arunner-heartbeat`); while developing,
-> run them directly as `python3 bin/<name>.py`.
+> The engine ships **inside the package** at `arunner/engine/<name>.py`, so the
+> installed wheel's single console entry point — `arunner` (→ `arunner.cli:main`,
+> the FR-53 lifecycle CLI) — can reach it. While developing, run the engine
+> modules directly as `python3 arunner/engine/<name>.py`, or drive the CLI with
+> `python -m arunner <verb>`.
 
 ## Load-bearing conventions (do not violate)
 

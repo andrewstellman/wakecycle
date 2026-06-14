@@ -33,7 +33,7 @@
 
 | ID | Test | Executor | Setup | PASS criteria | README cell |
 |---|---|---|---|---|---|
-| V-11 | **Real compute jobs, no AI** — 3 shell jobs that do actual work (e.g. clone a small public repo + run its test suite; tar/compress a tree; run arunner's own 65-test suite) each wrapped in a ~10-line script that heartbeats via `bin/heartbeat.py` before/during/after | WORKER (macOS) | shell plan, pool 2, realistic stall threshold | mixed durations → staggered dispatch; real exit codes mapped to COMPLETED/FAILED terminals; one job INTENTIONALLY failing (nonzero exit → FAILED heartbeat) displays correctly | the worker-contract paragraph; "no-helper path" if one job uses raw `echo >>` instead of the helper |
+| V-11 | **Real compute jobs, no AI** — 3 shell jobs that do actual work (e.g. clone a small public repo + run its test suite; tar/compress a tree; run arunner's own 65-test suite) each wrapped in a ~10-line script that heartbeats via `arunner/engine/heartbeat.py` before/during/after | WORKER (macOS) | shell plan, pool 2, realistic stall threshold | mixed durations → staggered dispatch; real exit codes mapped to COMPLETED/FAILED terminals; one job INTENTIONALLY failing (nonzero exit → FAILED heartbeat) displays correctly | the worker-contract paragraph; "no-helper path" if one job uses raw `echo >>` instead of the helper |
 | V-12 | **Stall detection live** — a real worker killed mid-run (`kill <PID from claim lock>`), short `stall_threshold_minutes` (2) | WORKER | V-11's plan, one entry | STALLED appears after threshold; PID-liveness shows dead-process fast-fail (A-5); run continues; table honest | stall claims |
 | V-13 | **STOP with real workers in flight** | WORKER | V-11 rerun | stop tick read-only; orphan semantics as documented (real processes run to completion); resume after deleting STOP | UC-3/UC-4 with real processes |
 | V-14 | **Real AI workers via `worker_cmd`** — at least one entry whose worker is a real agent CLI invocation doing a small real task (e.g. `claude` non-interactive or `codex exec` summarizing a repo to a file, heartbeat-wrapped) | OPERATOR decision first (real API/subscription spend, ~minutes of agent time) then WORKER | shell plan, 1-2 entries | agent worker launches detached, heartbeats, terminal sentinel carries a real `result_file` | "Codex/Copilot/Cursor CLIs as workers" partially; full per-host matrix stays v0.2 |
@@ -86,6 +86,6 @@ Watch for: workers spawning with PIDs, idle tick(s), staggered dispatch, clean D
 ## Operator runbook — V-10 (safety tick, ~15 min, any time)
 
 1. Start a rung-1 run: fresh Claude Code session, paste the bootstrap with the subagent demo plan — **set `pool_size` ≥ entry count** so everything dispatches in tick 1 (a safety tick can't dispatch subagent entries; it can only reap/advance — C-2).
-2. In a second terminal, run a crude safety tick: `while sleep 120; do python3 bin/ticker.py --once <run-dir>; done` — observe cycle-only no-ops while the session lives.
+2. In a second terminal, run a crude safety tick: `while sleep 120; do python3 arunner/engine/ticker.py --once <run-dir>; done` — observe cycle-only no-ops while the session lives.
 3. Mid-run (during the idle phase), **quit the Claude Code session**.
 4. Watch the safety-tick loop finish the run to DONE unattended. That's FR-26a verified end-to-end: kill the orchestrator, lose nothing.

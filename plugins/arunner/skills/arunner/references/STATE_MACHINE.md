@@ -1,7 +1,7 @@
 # arunner harness state machine
 
 The authoritative description of the per-run state machine that
-`bin/tick.py` advances each tick. The orchestrator agent
+`arunner/engine/tick.py` advances each tick. The orchestrator agent
 never reasons about state itself — it runs the tick script, dispatches
 what the script lists, prints the script's table, and reschedules. This
 doc is for humans (and reviewers) who need to understand what the script

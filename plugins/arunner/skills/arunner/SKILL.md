@@ -10,7 +10,7 @@ license: Apache-2.0
 You are the harness orchestrator. Your entire per-tick job is small and
 fixed: run one Python script, dispatch the worker subagents it lists,
 print the table it formats, and schedule the next tick. **All** the
-state-machine logic lives in `bin/tick.py` — you never reason
+state-machine logic lives in `arunner/engine/tick.py` — you never reason
 about run state yourself. (Details: `references/STATE_MACHINE.md`.)
 
 **The worker contract (the whole of it):** *a job is anything that appends
@@ -45,7 +45,7 @@ As a Claude Code session you run at **cadence 1 + dispatch 1**: you have
 workers' lifetime. Announce that, leading with the version banner (FR-34) —
 the running version is always visible: *"arunner <version> — Harness:
 cadence rung 1 (ScheduleWakeup) + dispatch rung 1 (subagent). Plan has N
-entries, pool P."* (the version is the one `bin/tick.py` printed to stderr;
+entries, pool P."* (the version is the one `arunner/engine/tick.py` printed to stderr;
 the canonical source is `arunner/__init__.py:__version__`). If the plan's
 entries are `dispatch_mode: "shell"`, you cannot run them in-session — tell
 the operator to drive the run with the ticker (the printed command below)
@@ -58,34 +58,34 @@ EXACT command to continue this run from a plain terminal window, with the
 absolute paths filled in:
 
     To continue this run in another window, execute:
-      python3 <ARUNNER_REPO>/bin/ticker.py --once <RUN_DIR>
-    (or, to loop it automatically: python3 <ARUNNER_REPO>/bin/ticker.py <RUN_DIR>)
+      python3 <ARUNNER_REPO>/arunner/engine/ticker.py --once <RUN_DIR>
+    (or, to loop it automatically: python3 <ARUNNER_REPO>/arunner/engine/ticker.py <RUN_DIR>)
 
 The floor is always one copy-paste away; no run is ever stranded.
 
 ## Determine your paths first
 
 - `ARUNNER_REPO` = `git rev-parse --show-toplevel` (run once; use absolute
-  paths from then on). The tick script is `<ARUNNER_REPO>/bin/tick.py`.
+  paths from then on). The tick script is `<ARUNNER_REPO>/arunner/engine/tick.py`.
 - `PLAN` = the harness plan file the operator named (a `*.json` matching
   `schemas/plan.schema.json`).
 
 **Invocation hygiene (load-bearing):** always invoke the script directly —
-`python3 <ARUNNER_REPO>/bin/tick.py <arg>`. Never wrap it in an
+`python3 <ARUNNER_REPO>/arunner/engine/tick.py <arg>`. Never wrap it in an
 unquoted shell variable: some shells (zsh) do not word-split an unquoted
 `$VAR`, so `$TICK <arg>` tries to exec a binary whose name is the whole
 string and fails.
 
 ## First invocation only
 
-1. Run `python3 <ARUNNER_REPO>/bin/tick.py --init <PLAN>`. It
+1. Run `python3 <ARUNNER_REPO>/arunner/engine/tick.py --init <PLAN>`. It
    prints the new run-dir path; capture it as `RUN_DIR` (absolute) and use
    it for every subsequent tick.
 2. Immediately perform one tick (below) against `RUN_DIR`.
 
 ## Per-tick sequence (do exactly this, nothing more)
 
-1. Run `python3 <ARUNNER_REPO>/bin/tick.py <RUN_DIR>`. Capture stdout.
+1. Run `python3 <ARUNNER_REPO>/arunner/engine/tick.py <RUN_DIR>`. Capture stdout.
 2. Parse stdout as JSON: `{dispatch_list, status_table, next_tick_minutes, done, stop}`.
 3. If `stop` is true: print `status_table`, state "STOP detected — halting, no further ticks", do NOT call ScheduleWakeup, end the session's work.
 4. If `done` is true: print `status_table` plus a one-line final summary, do NOT call ScheduleWakeup, end the session's work.
@@ -145,8 +145,8 @@ double-runs:
 - Re-paste `references/BOOTSTRAP_PROMPT.md` into a fresh session and, instead
   of `--init`, run a tick directly against the existing `RUN_DIR`.
 - Or run the printed floor command in a plain window:
-  `python3 <ARUNNER_REPO>/bin/ticker.py --once <RUN_DIR>` (one tick) or
-  `python3 <ARUNNER_REPO>/bin/ticker.py <RUN_DIR>` (loop until done).
+  `python3 <ARUNNER_REPO>/arunner/engine/ticker.py --once <RUN_DIR>` (one tick) or
+  `python3 <ARUNNER_REPO>/arunner/engine/ticker.py <RUN_DIR>` (loop until done).
 
 The two silent wakeup-drops observed in the wild (2026-06-11) are exactly
 why the printed floor command exists — print it whenever you reschedule so
@@ -192,7 +192,7 @@ instruction is a file named `NNN-...` (zero-padded numeric prefix). An
 instruction is *processed* when an output file with the same `NNN` stem exists
 in the outputs folder. Process the **lowest-numbered instruction with no
 matching output**, write that output, then look again; idle when the queue is
-empty. The selection is deterministic — `bin/incontext.py` computes it
+empty. The selection is deterministic — `arunner/engine/incontext.py` computes it
 (`incontext.py next <instructions> <outputs> [--stop-file F]`), so you never
 have to eyeball it. A `STOP` file halts the queue, **including mid-queue**: while
 STOP is present you pick nothing (FR-10 read-only).
