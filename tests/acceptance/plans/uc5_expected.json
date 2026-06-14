@@ -1,0 +1,13 @@
+{
+  "done": true,
+  "counts": {
+    "completed": 3,
+    "failed": 0
+  },
+  "run_states": {
+    "run-01": "completed",
+    "run-02": "completed",
+    "run-03": "completed"
+  },
+  "no_double_dispatch": true
+}

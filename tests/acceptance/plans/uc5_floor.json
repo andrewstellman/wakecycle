@@ -1,0 +1,69 @@
+{
+  "schema_version": "1",
+  "tick_interval_minutes": 1,
+  "pool_size": 2,
+  "stall_threshold_minutes": 45,
+  "launch_grace_minutes": 10,
+  "entries": [
+    {
+      "task_id": "floor-a",
+      "target_repo": ".",
+      "dispatch_mode": "shell",
+      "worker_prompt": "floor stub floor-a",
+      "worker_cmd": [
+        "python3",
+        "{STUB}",
+        "--heartbeat",
+        "{HEARTBEAT_PATH}",
+        "--task-id",
+        "{TASK_ID}",
+        "--run-dir",
+        "{RUN_DIR}",
+        "--steps",
+        "1",
+        "--sleep",
+        "0.05"
+      ]
+    },
+    {
+      "task_id": "floor-b",
+      "target_repo": ".",
+      "dispatch_mode": "shell",
+      "worker_prompt": "floor stub floor-b",
+      "worker_cmd": [
+        "python3",
+        "{STUB}",
+        "--heartbeat",
+        "{HEARTBEAT_PATH}",
+        "--task-id",
+        "{TASK_ID}",
+        "--run-dir",
+        "{RUN_DIR}",
+        "--steps",
+        "1",
+        "--sleep",
+        "0.05"
+      ]
+    },
+    {
+      "task_id": "floor-c",
+      "target_repo": ".",
+      "dispatch_mode": "shell",
+      "worker_prompt": "floor stub floor-c",
+      "worker_cmd": [
+        "python3",
+        "{STUB}",
+        "--heartbeat",
+        "{HEARTBEAT_PATH}",
+        "--task-id",
+        "{TASK_ID}",
+        "--run-dir",
+        "{RUN_DIR}",
+        "--steps",
+        "1",
+        "--sleep",
+        "0.05"
+      ]
+    }
+  ]
+}
