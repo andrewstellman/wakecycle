@@ -17,9 +17,11 @@ agent-driven run that has no such meta, the same verdict is reached from the
 DURABLE artifacts a real run writes:
   * disk-gradeable alone   -> ``done``, ``counts``, ``run_states``, ``paused``,
                               ``summary_present``, ``results_for_terminal``,
-                              ``stopped`` (the STOP file on disk), and the
-                              continuation ``verdict_present``/``final_done``
-                              (from ``journal.ndjson`` + ``harness_status.json``).
+                              ``stopped`` (the STOP file on disk),
+                              ``no_double_dispatch`` (<=1 STARTING per run's
+                              heartbeat -- UC-2/UC-4), and the continuation
+                              ``verdict_present``/``final_done`` (from
+                              ``journal.ndjson`` + ``harness_status.json``).
   * needs a before-snapshot -> ``stop_readonly`` (UC-3): the agent copies
                               ``harness_status.json`` to ``_before_snapshot.json``
                               before the control action; the checker compares.
@@ -319,6 +321,32 @@ def check(run_dir, expected):
             if bool(got_done) != bool(cont_exp["final_done"]):
                 fails.append("continuation final_done: expected %r, got %r"
                              % (cont_exp["final_done"], got_done))
+
+    # 9. no double-dispatch (UC-2 idempotent re-tick, UC-4 resume).  [durable]
+    # Idempotency guarantees an entry past `queued` is never re-dispatched
+    # (FR-6) -- so each run was STARTED at most once. A re-dispatch would append
+    # a SECOND STARTING line to that run's heartbeat file (a second worker), so
+    # the durable signal is: every run's heartbeat has <= 1 STARTING line.
+    if expected.get("no_double_dispatch"):
+        for run in (status.get("runs") or {}):
+            hb = os.path.join(run_dir, run, "heartbeat.ndjson")
+            if not os.path.isfile(hb):
+                continue
+            starts = 0
+            with open(hb, "r", encoding="utf-8", errors="replace") as fh:
+                for ln in fh:
+                    ln = ln.strip()
+                    if not ln:
+                        continue
+                    try:
+                        obj = json.loads(ln)
+                    except ValueError:
+                        continue
+                    if isinstance(obj, dict) and obj.get("status") == "STARTING":
+                        starts += 1
+            if starts > 1:
+                fails.append("double-dispatch: %s was STARTED %d times "
+                             "(expected at most once)" % (run, starts))
     return fails
 
 

@@ -126,6 +126,35 @@ class StopReadonlySnapshot(unittest.TestCase):
         self.assertTrue(any("snapshot" in f for f in fails), fails)
 
 
+class NoDoubleDispatch(unittest.TestCase):
+    """UC-2 idempotent re-tick + UC-4 resume: an entry past `queued` is never
+    re-dispatched (FR-6), so each run's heartbeat has <= 1 STARTING line. A
+    re-dispatch (a second worker) appends a second STARTING -> the durable
+    double-dispatch signal."""
+
+    def _rd_with_starts(self, starts_per_run):
+        rd = _build_run_dir(states=tuple("completed" for _ in starts_per_run))
+        for i, n in enumerate(starts_per_run):
+            hbdir = rd / ("run-%02d" % (i + 1))
+            hbdir.mkdir(exist_ok=True)
+            lines = [json.dumps({"status": "STARTING", "label": "stub"})
+                     for _ in range(n)]
+            lines.append(json.dumps({"status": "COMPLETED"}))
+            (hbdir / "heartbeat.ndjson").write_text("\n".join(lines) + "\n",
+                                                    encoding="utf-8")
+        return rd
+
+    def test_single_start_per_run_passes(self):
+        rd = self._rd_with_starts([1, 1])
+        self.assertEqual(C.check(rd, {"no_double_dispatch": True}), [])
+
+    def test_double_start_fails(self):                          # PIN
+        rd = self._rd_with_starts([1, 2])     # run-02 was STARTED twice
+        fails = C.check(rd, {"no_double_dispatch": True})
+        self.assertTrue(any("double-dispatch" in f and "run-02" in f
+                            for f in fails), fails)
+
+
 class CheckerCLI(unittest.TestCase):
 
     def _run_cli(self, rd, expected):
