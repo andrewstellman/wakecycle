@@ -75,8 +75,35 @@ def expand_jobs(doc: dict) -> dict:
     return plan
 
 
+def session_bundle(doc: dict) -> dict:
+    """FR-52.4 ``my_run.json``: one file carrying the shorthand SOURCE (``jobs``
+    + top-level knobs) AND the expanded canonical ``plan``, so a saved session
+    reruns faithfully (run the ``plan``) yet stays editable (the ``jobs``)."""
+    bundle = {k: v for k, v in doc.items() if k != "plan"}
+    bundle["plan"] = expand_jobs(doc)
+    return bundle
+
+
+def bundle_drifted(bundle: dict) -> bool:
+    """True if re-expanding a my_run.json bundle's shorthand no longer matches
+    its saved ``plan`` (a hand-edit-drift signal -- warn, don't block)."""
+    src = {k: v for k, v in bundle.items() if k != "plan"}
+    return expand_jobs(src) != bundle.get("plan")
+
+
+def _write_json(obj, out_path) -> None:
+    Path(out_path).write_text(json.dumps(obj, indent=2) + "\n", encoding="utf-8")
+
+
 def main(argv=None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    out = save = None
+    if "--out" in args:
+        i = args.index("--out"); out = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
+    if "--save" in args:
+        i = args.index("--save"); save = args[i + 1] if i + 1 < len(args) else None
+        del args[i:i + 2]
     if len(args) == 2 and args[0] == "expand":
         try:
             doc = json.loads(Path(args[1]).read_text(encoding="utf-8"))
@@ -84,9 +111,17 @@ def main(argv=None) -> int:
             print("jobs: cannot read shorthand %s (%s)" % (args[1], exc),
                   file=sys.stderr)
             return 2
-        print(json.dumps(expand_jobs(doc), indent=2))
+        if save:                              # FR-52.4: persist jobs + plan
+            _write_json(session_bundle(doc), save)
+            print(save)
+        elif out:                             # FR-52.4: write the expanded plan
+            _write_json(expand_jobs(doc), out)
+            print(out)
+        else:
+            print(json.dumps(expand_jobs(doc), indent=2))
         return 0
-    print("usage: jobs.py expand <shorthand.json>", file=sys.stderr)
+    print("usage: jobs.py expand <shorthand.json> [--out <plan>] [--save <my_run.json>]",
+          file=sys.stderr)
     return 64
 
 
