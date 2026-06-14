@@ -47,6 +47,10 @@ Agent-facing steps:
 
 Most legs are disk-objective (the checker grades the run-dir). A few legs live in agent behavior, not the run-dir, and are **agent-self-reported with evidence** rather than checker-graded: UC-2's table reading, UC-10's NL comprehension, UC-9's "did the fresh context actually rehydrate from disk." The runbook marks which is which so the pass criterion is honest.
 
+**Deterministic gradeable legs vs. live/environment legs (instr 045).** Every UC's *engine mechanic* is exercised by a deterministic driving test (`test_acceptance_uc15.py` for UC-1..7, `test_acceptance_uc89101112.py` for UC-8..12): the plan is driven to its `expected` and graded by the checker, with the load-bearing invariant mutation-pinned. These drive the engine without a live agent — for the subagent (rung-1) plans a tiny in-test driver emits the same STARTING/COMPLETED heartbeats a stub subagent would; for the floor plans the real `ticker.py --once`. The **live in-agent runs** (UC-1/2/3/4/9/10/11 driven by an actual orchestrator turn) and the **real environment legs** remain the operator's recorded action:
+- **UC-6 (scheduled):** the deterministic leg graded here is **one tick per `--once` fire** (each fire advances the cycle by exactly 1, no double-dispatch, N fires → `done`). The distinguishing leg — a **real cron/launchd/Task Scheduler** actually firing `--once` on a schedule — is **operator-recorded** (it can't be asserted from a unit run).
+- **UC-7 (manual):** same `--once` mechanism, **operator-paced**; the deterministic equivalent (repeated single ticks → `done`) is graded here, the real by-hand run is operator-recorded.
+
 ## Running them
 
 `AGENTS.md` gets a "run the acceptance tests" section: read this runbook, run each test back to back, grade each with the checker CLI, and report a pass/fail roll-up by use case (with the checker's failure lines and the run-context: OS + agent).
