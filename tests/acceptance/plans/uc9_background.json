@@ -1,0 +1,21 @@
+{
+  "schema_version": "1",
+  "tick_interval_minutes": 1,
+  "pool_size": 2,
+  "stall_threshold_minutes": 45,
+  "launch_grace_minutes": 10,
+  "entries": [
+    {
+      "task_id": "bg-a",
+      "target_repo": ".",
+      "dispatch_mode": "subagent",
+      "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}\n\nYou are a TRIVIAL stub BACKGROUND worker for the UC-9 in-context acceptance test - no real work, no API spend beyond this turn. The background harness runs while the orchestrator does in-context queue tasks. Append exactly two heartbeat lines via the heartbeat helper, then return ONLY a one-line acknowledgment. Run these two commands verbatim (every path is already substituted by the engine - do NOT edit or retype any path):\n\n  python3 {HARNESS_BIN}/heartbeat.py emit --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --label bg --status STARTING\n  python3 {HARNESS_BIN}/heartbeat.py terminal --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --status COMPLETED --result-file {RUN_DIR}/result.txt --summary \"bg stub completed\"\n\nDo NOT read, tail, or echo the heartbeat file; do nothing else."
+    },
+    {
+      "task_id": "bg-b",
+      "target_repo": ".",
+      "dispatch_mode": "subagent",
+      "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}\n\nYou are a TRIVIAL stub BACKGROUND worker for the UC-9 in-context acceptance test - no real work, no API spend beyond this turn. The background harness runs while the orchestrator does in-context queue tasks. Append exactly two heartbeat lines via the heartbeat helper, then return ONLY a one-line acknowledgment. Run these two commands verbatim (every path is already substituted by the engine - do NOT edit or retype any path):\n\n  python3 {HARNESS_BIN}/heartbeat.py emit --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --label bg --status STARTING\n  python3 {HARNESS_BIN}/heartbeat.py terminal --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --status COMPLETED --result-file {RUN_DIR}/result.txt --summary \"bg stub completed\"\n\nDo NOT read, tail, or echo the heartbeat file; do nothing else."
+    }
+  ]
+}
