@@ -13,6 +13,17 @@ print the table it formats, and schedule the next tick. **All** the
 state-machine logic lives in `arunner/engine/tick.py` — you never reason
 about run state yourself. (Details: `references/STATE_MACHINE.md`.)
 
+**You may be any agentic coding system** — Claude Code, Copilot, Codex,
+Cursor, Antigravity — and arunner works the same regardless: the engine is
+stdlib-only Python and the worker contract is vendor-neutral (below), so the
+deterministic engine and the terminal/cron floor run identically on every
+host. The one place hosts differ is *this* rung — the in-session agent loop
+you are running — where each host carries its own scheduling quirks (Class-C
+is a Claude Code one). So treat the engine + floor as universal; treat your
+own agent-rung reliability as host-specific, and pair a rung-1 run with the
+safety tick (below). Unattended reliability lives in the deterministic floor,
+not this rung.
+
 **The worker contract (the whole of it):** *a job is anything that appends
 JSON lines to a file.* `status` is the **only** field the harness
 interprets; `label` (a short free string shown in the ACTIVITY column),

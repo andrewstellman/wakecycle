@@ -1,14 +1,29 @@
 # Arunner
 
-**A batch orchestrator for AI coding agents that runs inside the agent
-session you already have — no server, no daemon, no framework, no API keys
-beyond your session, no admin rights.**
+**A batch orchestrator for _any_ agentic coding system — Claude Code, GitHub
+Copilot, Codex, Cursor, Antigravity, … — not one vendor. It runs inside the
+agent session you already have: no server, no daemon, no framework, no API
+keys beyond your session, no admin rights.**
 
 Point it at a list of jobs (audit these ten repos, run this benchmark across
 these branches) and it runs them in a pool, watches their progress, and
-leaves a complete record on disk — driven entirely by your existing agent
-session waking itself on a timer, or, on a locked-down machine, by one plain
-Python script in a terminal window.
+leaves a complete record on disk — driven by your existing agent session
+waking itself on a timer, or, on a locked-down machine, by one plain Python
+script in a terminal window.
+
+**"Any agentic system" is structural, not a slogan.** Arunner is vendor-neutral
+*by construction*: the orchestration engine is stdlib-only Python (it runs
+wherever Python 3 does), the worker contract is vendor-neutral (*a job is
+anything that appends JSON lines to a file*), and work is dispatched either as
+in-session subagents or as detached host-CLI processes (FR-14/15) — no vendor
+SDK anywhere. **The honesty split that keeps that claim true:** the
+deterministic engine and the terminal/cron floor are genuinely host-agnostic
+and run identically everywhere; the one place hosts differ is the *in-session
+agent rung* (each host has its own scheduling quirks — Class-C is a Claude Code
+one). So "runs on any agentic system" describes the engine + floor — never an
+unvalidated per-host claim about the agent rung. Which hosts are proven, and in
+which role (as a **worker** or as a builder-driving **orchestrator**), is in the
+support table below.
 
 ## The thesis (30 seconds)
 
@@ -168,7 +183,17 @@ Per NFR-12, every claim is labeled **VERIFIED** (evidence behind it) or
 **DESIGNED** (built and unit-tested, but no end-to-end host run yet). Don't
 trust a DESIGNED cell as if it were proven.
 
-| Host / rung | Dispatch | Status | Evidence |
+A host can play **two distinct roles**, verified separately: (i) as a detached
+**worker** — a `worker_cmd` agent CLI the engine launches and reaps (Copilot and
+Codex are VERIFIED here, macOS, rung 3, V-14); and (ii) as the builder-driving
+**orchestrator** that reads the skill and assembles/drives a run conversationally
+(the FR-52 interactive builder). The two are independent: V-14 verified Copilot
+and Codex as *workers*, **not** as builder-driving orchestrators. The builder is
+*designed* for any capable host but VERIFIED only on Claude Code (it embeds no
+model — the host does the natural-language understanding — so "any host" is a
+design property, not yet a proven per-host claim).
+
+| Host / rung / role | Dispatch | Status | Evidence |
 |---|---|---|---|
 | Claude Code, cadence 1 (in-session timer) | subagent | **VERIFIED** | 3 Sonnet validation passes + Haiku 4.5 (one clean autonomous-loop pass + one observed failure path — the low-reasoning-model bet), 2026-06-11; multi-entry pool run with staggered dispatch, agent-honored STOP, detached workers outliving the dispatch turn (pgrep-verified) |
 | Foreground ticker, cadence 3 (no-admin floor), macOS | shell | **VERIFIED** | Live end-to-end demo in-repo, 2026-06-12: pool gating, real detached PIDs, idle tick, staggered dispatch on reap, clean DONE — independently reproduced |
@@ -177,7 +202,8 @@ trust a DESIGNED cell as if it were proven.
 | OS scheduler, cadence 2 — **cron (macOS)** | shell | **VERIFIED** | cron drove a shell plan to `done` fully unattended (no foreground process), 2026-06-12, after the double-fork detachment fix that lets workers survive the cron job's process-tree teardown; E1 overlapping-fire lockfile skip witnessed; crontab snapshot/restored (VALIDATION V-9). |
 | OS scheduler, cadence 2 — Windows Task Scheduler / other hosts | shell | **DESIGNED** | `--once` is the cross-host schedule target and unit-tested; no Windows/other scheduled-run yet |
 | Windows / Linux, foreground ticker | shell | **DESIGNED** | Platform branches are stdlib + unit-tested (detach flags, PID liveness, lockfile); verified live on macOS only |
-| **Copilot + Codex** CLIs as workers (macOS, rung 3) | shell | **VERIFIED** | both ran as detached `worker_cmd` agent workers under the plain ticker (no agent-orchestrator), 2026-06-12: heartbeated STARTING/running, terminal COMPLETED carrying a real `result_file` with a real summary (Copilot→README, Codex→REQUIREMENTS); auth pre-flight ran (FR-16) (VALIDATION V-14). |
+| **Copilot + Codex** CLIs — host as **worker** (macOS, rung 3) | shell | **VERIFIED** | both ran as detached `worker_cmd` agent workers under the plain ticker (no agent-orchestrator), 2026-06-12: heartbeated STARTING/running, terminal COMPLETED carrying a real `result_file` with a real summary (Copilot→README, Codex→REQUIREMENTS); auth pre-flight ran (FR-16) (VALIDATION V-14). |
+| Interactive builder — host as **orchestrator** (FR-52) | subagent/shell | **DESIGNED** (VERIFIED: Claude Code only) | The builder is host-agent-driven and embeds no model; designed for any capable host, but only Claude Code has driven it end-to-end. V-14 verified Copilot/Codex as detached *workers*, not as builder-driving orchestrators. |
 | Cursor CLI + per-host orchestrator matrices | shell | **DESIGNED** | `worker_cmd` is CLI-agnostic; Cursor + the cross-host matrix are v0.2 |
 
 The in-session timer (rung 1) is reliable *as a timer* but the resumed turn

@@ -24,16 +24,25 @@ installed files before you give it** — never invent a flag.
 
 ## What this is
 
-A batch orchestrator for AI coding agents. You write a **plan** (JSON: a list
+A batch orchestrator for **any** agentic coding system — Claude Code, Copilot,
+Codex, Cursor, Antigravity — not one vendor. You write a **plan** (JSON: a list
 of jobs + a pool size + a tick cadence). The harness runs the jobs a poolful
 at a time, watches each one's heartbeat file, prints a status table every
 tick, and stops when they're all done. All the logic is in one stdlib Python
 script; your agent session (or a plain terminal) just relays and sleeps. No
 server, no API keys beyond the session you already have, no admin rights.
 
-The contract for a "job" is tiny: **a job is anything that appends JSON lines
-to a file.** So a worker can be an AI agent, a shell script, a `make` target,
-a CI job, or anything that can write a line.
+It's vendor-neutral *by construction*: stdlib-only Python (runs wherever
+Python 3 does), the worker contract is **a job is anything that appends JSON
+lines to a file** (so a worker can be an AI agent, a shell script, a `make`
+target, a CI job, or anything that can write a line), and dispatch is
+in-session subagents or detached host-CLI processes — no vendor SDK.
+**The honesty split:** the engine and the terminal/cron floor are host-agnostic
+and run identically everywhere; the in-session agent rung is where hosts differ.
+So steer anyone who needs reliable **unattended** runs to the deterministic
+ticker/cron rungs (2–4) — immune to the Class-C agent-loop drop; the in-session
+agent rung is the interactive/convenient mode, backed by the FR-26a safety tick,
+**not** the unattended-reliability path.
 
 ## Install (user-level, no admin)
 
