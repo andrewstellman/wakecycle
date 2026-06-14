@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-The harness is a batch orchestrator for AI coding agents that runs **inside the operator's existing agent session** — or, degraded gracefully, inside a plain terminal window — with no server, no daemon, no framework, no API keys beyond the session the operator already has, and no admin rights.
+The harness is a batch orchestrator for AI coding agents that runs **inside the operator's existing agent session** — or, degraded gracefully, inside a plain terminal window — with no server, no daemon, no framework, no API keys beyond the session the operator already has, and no admin rights. It is deliberately **agent-agnostic**: it orchestrates *any* agentic coding system (Claude Code, Copilot, Codex, Cursor, Antigravity, …) rather than one vendor, because the engine is stdlib Python and the worker contract is vendor-neutral (FR-54). The primary way an operator uses it is conversational — describe a run in plain language to the agent that has the skill loaded, and it assembles, previews, runs, and saves the session (FR-52).
 
 Its architecture inverts the usual orchestration-framework shape. Frameworks put the intelligence in external infrastructure and treat the model as a worker. The harness puts **all the determinism in a small stdlib Python script** (the tick engine: a disk-truth state machine advanced one idempotent tick at a time) and uses the agent only as a relay that can wake on a schedule and start workers. The agent never decides anything; the script is the state machine; disk is the database; crash-recovery is "run one tick."
 
@@ -165,6 +165,21 @@ The harness was built as the Quality Playbook's test harness (replacing a ~10K-l
 **Alternative paths:** (a) A Class-C agent-loop drop (C-5) stops the loop → the background workers are still rescuable by the deterministic floor (`ticker.py --once`), while the in-context queue waits for an operator re-bootstrap. (b) A single in-context task longer than ~4× the stall threshold looks like a slept machine to the engine → the orchestrator passes a "busy, not asleep" hint so a genuine stall isn't blurred (FR-8 / E2 interaction).
 **Postconditions:** Instruction outputs written; background run-dir consistent; full disk record; resumable from disk alone.
 
+### UC-10: Build and run a session conversationally (the headline UX)
+
+**Summary:** The operator describes a batch in plain language to the agent that has the skill loaded; the agent assembles the run, previews it, launches it on confirmation, and saves it for rerun — all without the operator hand-writing a plan.
+**Rationale:** The build-and-run experience is what makes the tool usable and testable as a real user journey (FR-52/53); it showcases the whole system (shorthand + wrap adapter + dispatch modes + pool + SUMMARY) and works in any host agent (FR-54).
+**Users:** Operator, host agent (any agentic coding system).
+**Preconditions:** A host agent with the skill loaded; Python 3 available.
+**Basic course of events:**
+1. Operator: "run three jobs from `ABC.md`, `DEF.md`, `GHI.md`, pool 2, subagents." The agent assembles a `jobs:` shorthand, inferring subagent dispatch and reading each file as a worker prompt (FR-52.1).
+2. Agent previews the assembled plan + `--check` result; operator confirms (FR-52.2).
+3. Agent launches; the status table streams; on `done` the SUMMARY capstone is written (FR-45).
+4. Operator: "save that to `my_run.json`." The agent writes both the shorthand and the expanded canonical plan (FR-52.4).
+5. Later: `run my_run.json` reruns it faithfully; `status`/`resume`/`summary` cover watch-and-continue (FR-53).
+**Alternative paths:** (a) "run `abc.exe def.exe ghi.exe jkl.exe`, pool 3" → the agent infers shell dispatch and wraps each executable via the FR-40 wrap adapter. (b) An ambiguous request → the agent asks a clarifying question rather than guessing. (c) Mid-build refinement: "add a fourth job", "change pool to 3", "make job 2 shell" (FR-52.5).
+**Postconditions:** A run launched (or an authored/saved plan); optionally `my_run.json` persisted (shorthand + expanded) for faithful rerun.
+
 ## 5. Functional requirements
 
 **Plan & configuration**
@@ -263,6 +278,21 @@ The harness was built as the Quality Playbook's test harness (replacing a ~10K-l
 
 **Positioning**
 - FR-50: **Unattended-reliability guidance.** README/TOOLKIT steer operators who need reliable *unattended* runs toward the deterministic ticker/cron rungs (immune to the Class-C agent-loop drop, C-5), framing the in-session agent rung as the interactive/convenient mode backed by the FR-26a safety tick. The agent rung is not presented as the unattended-reliability path.
+- FR-54: **Cross-agent universality is the identity — lead with it, keep it honest.** The product orchestrates ANY agentic coding system — Claude Code, Copilot, Codex, Cursor, Antigravity, … — not one vendor. This is delivered by construction: stdlib-only Python (runs wherever Python 3 does), the vendor-neutral contract *a job is anything that appends JSON lines to a file*, and host-CLI/subagent dispatch (FR-14/15). Messaging (README/TOOLKIT/SKILL) leads with this, not with any single host. **Honesty split (load-bearing):** the deterministic engine and the ticker/cron floor are genuinely host-agnostic and run identically everywhere; the *in-session agent rung* is where host differences live (Class-C is a Claude Code quirk; other hosts have their own scheduling quirks), so the universal-*reliability* claim rests on the floor, with the per-host agent rung as the convenience on top. The README support table marks each host VERIFIED (evidence-linked — e.g. Copilot + Codex, macOS, rung 3, from V-14) vs DESIGNED (NFR-12); "runs on any agentic system" describes the engine + floor, never an unvalidated per-host agent-rung claim.
+
+### v0.1.0 interactive UX (the build-and-run experience)
+
+*Added 2026-06-13 after the build was feature-complete: the interactive session builder is what makes the tool usable and testable as a real user journey, and the cross-agent identity (FR-54) is its backbone. Numbering continues the stable reference; build status PENDING (see §9).*
+
+- FR-52: **Interactive session builder (host-agent-driven; the tool stays LLM-free).** The headline UX: an operator describes a run in plain language to whatever agent has the skill loaded — "run three jobs from `ABC.md`, `DEF.md`, `GHI.md`, pool 2, subagents"; "run `abc.exe def.exe ghi.exe jkl.exe`, pool 3" — and a session is assembled, previewed, run, and optionally saved. **Architecture (load-bearing for FR-54):** the tool embeds NO model — the HOST agent does the natural-language understanding and drives the procedure documented in the SKILL/TOOLKIT; the tool provides only deterministic plumbing (expand the `jobs:` shorthand FR-43 → `--check` FR-42 → write the plan → run). The builder is *designed* to be driven by any capable host agent — but it runs in the host's natural-language layer, i.e. on the per-host **agent rung**, NOT the universal engine/floor (FR-54). So "any host agent" is DESIGNED; it is VERIFIED only on the host(s) that have actually driven it end-to-end (Claude Code today) per NFR-12 — V-14 verified Copilot/Codex as detached *workers*, not as builder-driving orchestrators. The procedure:
+  1. **Describe → assemble.** The agent builds a `jobs:` shorthand, **inferring dispatch per job by *intent*, not file extension**, on this precedence: (i) an explicit operator override wins; (ii) anything readable as agent instructions (a `.md`/`.txt`/`.prompt` file, or an inline instruction) ⇒ **subagent** mode, with the file's content read into the worker prompt; (iii) anything resolving to a runnable command — with or without args — ⇒ **shell** mode, the full command-with-args wrapped via the FR-40 wrap adapter (`adapter: "wrap"`); (iv) otherwise **ask** a clarifying question, never guess. One `jobs:` list MAY mix subagent and shell entries. (Reading a file into a prompt and choosing the mode are host-agent behaviors — the tool stays model-free; a resolved-vs-ask disambiguation table lives in TOOLKIT/SKILL.)
+  2. **Preview → confirm.** Show the assembled plan and the `--check` result, **echoing the inferred dispatch mode and prompt source per job** ("job 2: SHELL, wrapping `build.sh`") so a mis-inference is caught BEFORE spend, then wait for one explicit "go" — it spends real agent budget, so "just works" means low friction, not zero safety. If `--check` fails, no "go" is offered: the errors surface for editing (step 5). A confirmation is valid only for the exact previewed plan.
+  3. **Run.**
+  4. **Persist on request.** "Save that to `my_run.json`" writes ONE file carrying both a `jobs:` key (the human-editable shorthand source) and a `plan:` key (the expanded canonical entries — the reproducible lockfile). `run my_run.json` executes the `plan:` (lockfile semantics); on load the tool **re-expands `jobs:` and warns — does not block — if the result differs from the saved `plan:`** (a hand-edit-drift signal), offering to re-expand or run the lockfile as-is. (Writing the expanded plan to a path is a small new affordance — `expand --out <path>` — since the expander today only prints to stdout; the save path is absolute, never cwd-derived (FR-21a), and overwriting an existing file is confirmed.)
+  5. **Incremental editing.** Before launch — including when re-opening a saved-but-not-running plan — the conversation refines the run: "add a fourth job", "change pool to 3", "make job 2 shell". **Any edit returns the session to the unconfirmed state** (re-preview + re-`--check` + a fresh "go"). Editing a *live* run is out of scope here — that is the streaming-instruction-queue path (FR-47).
+
+  **Scope:** the builder AUTHORS-AND-LAUNCHES a fixed batch; dropping new jobs into a *live* run is the streaming-instruction-queue path (FR-47), not the builder.
+- FR-53: **First-class lifecycle verbs.** A coherent CLI vocabulary for the whole run lifecycle, so "start it, watch it, stop it, rerun it" is one obvious surface — and the backbone of an end-to-end integration test of the real user journey: `new` (interactive build, FR-52), `run <plan>` (launch an authored/saved plan), `status <run-dir>` (re-attach: read disk and print the current status table, read-only), `stop <run-dir>` (drop the `STOP` control file, FR-10, to halt cleanly), `resume <run-dir>` (continue an interrupted run; by default runs the ticker loop at rung 3 against the existing run-dir — the named front-end for the FR-13 resume — with `--once` as the single-tick form; idempotent), `summary <run-dir>` (print the SUMMARY capstone, FR-45; on a not-yet-done run it prints a "not done yet" notice rather than erroring). All are thin deterministic wrappers over existing capabilities (read disk, format the table, write a control file, tick, read SUMMARY) — no new engine state. Finer live control (pause/cadence/pool/cancel) stays the control-file convention (FR-35..39), not separate verbs. (The command name follows the final product name.)
 
 ## 6. Nonfunctional requirements
 
@@ -315,6 +345,9 @@ Kill semantics for in-flight workers on STOP (documented orphan behavior — tho
 | In-context dispatch-to-self (3rd dispatch mode, orthogonal to cadence) + streaming instruction queue + ERR + monitoring-pause visibility (FR-46..49, UC-9) | PENDING — v0.1.0 build, last increment; dogfood as the QPB runner before public ship |
 | Deterministic ticker-driven integration-test suite w/ independent disk assertions (FR-51) | PENDING — v0.1.0 build, FIRST increment; pins current behavior as the regression net |
 | Unattended-reliability positioning (FR-50) | PENDING — README/TOOLKIT pass |
+| Cross-agent universality positioning + honest engine/floor-vs-per-host split (FR-54) | PENDING — README/TOOLKIT/SKILL pass; per-host support table |
+| Interactive session builder: describe → preview → run → persist (both shorthand + expanded) → incremental edit (FR-52, UC-10) | PENDING — v0.1.0 UX build; host-agent-driven SKILL + deterministic plumbing |
+| First-class lifecycle verbs: new / run / status / resume / summary (FR-53) | PENDING — v0.1.0 UX build; thin wrappers over existing capabilities + E2E journey test |
 
 ---
 
