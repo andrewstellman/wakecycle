@@ -1,0 +1,27 @@
+{
+  "schema_version": "1",
+  "tick_interval_minutes": 1,
+  "pool_size": 2,
+  "stall_threshold_minutes": 45,
+  "launch_grace_minutes": 10,
+  "entries": [
+    {
+      "task_id": "uc1-a",
+      "target_repo": ".",
+      "dispatch_mode": "subagent",
+      "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}\n\nYou are a TRIVIAL stub worker for an acceptance test \u2014 no real work, no API spend beyond this turn. Append exactly two heartbeat lines via the heartbeat helper, then return ONLY a one-line acknowledgment. Run these two commands verbatim (every path is already substituted by the engine \u2014 do NOT edit or retype any path):\n\n  python3 {HARNESS_BIN}/heartbeat.py emit --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --label stub --status STARTING\n  python3 {HARNESS_BIN}/heartbeat.py terminal --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --status COMPLETED --result-file {RUN_DIR}/result.txt --summary \"stub acceptance worker done\"\n\nDo NOT read, tail, or echo the heartbeat file; do nothing else."
+    },
+    {
+      "task_id": "uc1-b",
+      "target_repo": ".",
+      "dispatch_mode": "subagent",
+      "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}\n\nYou are a TRIVIAL stub worker for an acceptance test \u2014 no real work, no API spend beyond this turn. Append exactly two heartbeat lines via the heartbeat helper, then return ONLY a one-line acknowledgment. Run these two commands verbatim (every path is already substituted by the engine \u2014 do NOT edit or retype any path):\n\n  python3 {HARNESS_BIN}/heartbeat.py emit --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --label stub --status STARTING\n  python3 {HARNESS_BIN}/heartbeat.py terminal --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --status COMPLETED --result-file {RUN_DIR}/result.txt --summary \"stub acceptance worker done\"\n\nDo NOT read, tail, or echo the heartbeat file; do nothing else."
+    },
+    {
+      "task_id": "uc1-c",
+      "target_repo": ".",
+      "dispatch_mode": "subagent",
+      "worker_prompt": "HEARTBEAT_PATH={HEARTBEAT_PATH}\nTASK_ID={TASK_ID}\nRUN_DIR={RUN_DIR}\nTARGET_REPO={TARGET_REPO}\n\nYou are a TRIVIAL stub worker for an acceptance test \u2014 no real work, no API spend beyond this turn. Append exactly two heartbeat lines via the heartbeat helper, then return ONLY a one-line acknowledgment. Run these two commands verbatim (every path is already substituted by the engine \u2014 do NOT edit or retype any path):\n\n  python3 {HARNESS_BIN}/heartbeat.py emit --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --label stub --status STARTING\n  python3 {HARNESS_BIN}/heartbeat.py terminal --task-id {TASK_ID} --heartbeat-path {HEARTBEAT_PATH} --status COMPLETED --result-file {RUN_DIR}/result.txt --summary \"stub acceptance worker done\"\n\nDo NOT read, tail, or echo the heartbeat file; do nothing else."
+    }
+  ]
+}
