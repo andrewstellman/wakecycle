@@ -287,7 +287,8 @@ class Uc12ActivityPatterns(unittest.TestCase):
         subprocess.run(
             [sys.executable, str(_ROOT / "arunner" / "engine" / "heartbeat.py"),
              "wrap", "--task-id", "act-1", "--heartbeat-path", str(hb),
-             "--launch-grace-minutes", "0", "--activity-regex", regex,
+             "--launch-grace-minutes", "0", "--keepalive-seconds", "0.3",
+             "--activity-regex", regex,
              "--"] + command,
             capture_output=True, timeout=40)
         labels = self._hb_inprogress_labels(hb)

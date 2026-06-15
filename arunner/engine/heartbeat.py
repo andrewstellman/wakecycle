@@ -246,6 +246,23 @@ def _cmd_terminal(args) -> int:
 
 _DEFAULT_LAUNCH_GRACE_MIN = 10
 _DEFAULT_STALL_THRESHOLD_MIN = 45
+# FR-58a: the activity-refresh cadence. The keepalive interval USED to be
+# min(launch_grace, stall/3) (~10 min at defaults), so short jobs emitted only
+# STARTING + terminal and the FR-56 activity patterns never fired. It is now a
+# configurable interval DECOUPLED from stall/3, defaulting to ~45s.
+_DEFAULT_KEEPALIVE_SECONDS = 45.0
+
+
+def _resolve_keepalive_secs(args) -> float:
+    """FR-58a: the activity-refresh / keepalive interval. An explicit
+    ``--keepalive-seconds`` wins (is-not-None); else the ~45s default. 1s floor
+    (Postel: a non-positive override floors, never crashes). Decoupled from
+    ``min(launch_grace, stall/3)`` -- the stall threshold stays coarse for
+    genuine stall detection; the dead-PID reap catches a hung-but-alive child."""
+    ks = getattr(args, "keepalive_seconds", None)
+    if ks is None:
+        ks = _DEFAULT_KEEPALIVE_SECONDS
+    return max(1.0, float(ks))
 
 
 def _grace_stall_secs(args) -> tuple:
@@ -429,13 +446,12 @@ class _Keepalive:
     def due(self, now: float) -> bool:
         return (now - self.last_emit) >= self.interval
 
-    def maybe_emit(self, now: float) -> bool:
-        """Emit ONE IN_PROGRESS keepalive if due at ``now``. Returns True if it
-        emitted. Label = the most-recent activity-pattern match (FR-56) if
-        patterns are configured, else the child's most recent output line, or a
-        neutral fallback when the child has been quiet (the ping still fires)."""
-        if not self.due(now):
-            return False
+    def _emit(self, now: float) -> None:
+        """Re-scan activity (the SAME event as the IN_PROGRESS emit -- FR-58a
+        does NOT split re-scan from emit, only the interval changes) and append
+        one IN_PROGRESS. Label = the most-recent activity-pattern match (FR-56)
+        if patterns are configured, else the child's most recent output line, or
+        a neutral fallback when the child has been quiet (the ping still fires)."""
         if self.activity is not None and self.activity.patterns:
             if self.activity_reader is not None:      # wrap: feed our own reader
                 self.activity.feed(self.activity_reader.new_lines(), now)
@@ -447,6 +463,21 @@ class _Keepalive:
             ts=_iso_from_epoch(now)))
         self.last_emit = now
         self.count += 1
+
+    def maybe_emit(self, now: float) -> bool:
+        """Emit ONE IN_PROGRESS keepalive if due at ``now``. Returns True if it
+        emitted."""
+        if not self.due(now):
+            return False
+        self._emit(now)
+        return True
+
+    def emit_first(self, now: float) -> bool:
+        """FR-58a first-scan-at-start: emit one activity-scanned IN_PROGRESS
+        immediately after STARTING, so a job shorter than the keepalive interval
+        still surfaces an activity line (without this a sub-interval job emits
+        only STARTING + terminal and the ACTIVITY column never moves)."""
+        self._emit(now)
         return True
 
 
@@ -459,8 +490,7 @@ def _cmd_wrap(args) -> int:
         print(f"{_NAME} wrap: no command given (use: wrap ... -- <cmd> [args])",
               file=sys.stderr)
         return 64
-    grace_secs, stall_secs = _grace_stall_secs(args)   # honors an explicit 0
-    interval = keepalive_interval_secs(grace_secs, stall_secs)
+    interval = _resolve_keepalive_secs(args)   # FR-58a: ~45s, decoupled from stall/3
     capture_path = (Path(args.capture_file) if args.capture_file
                     else Path(hb).parent / "wrap.out")
     try:
@@ -504,6 +534,7 @@ def _cmd_wrap(args) -> int:
         ka = _Keepalive(hb_path=Path(hb), task_id=tid, capture_path=capture_path,
                         interval_secs=interval, start_ts=start,
                         activity=activity, activity_reader=reader)
+        ka.emit_first(_now())               # FR-58a: first scan right after STARTING
         while True:
             try:
                 proc.wait(timeout=interval)
@@ -629,8 +660,7 @@ def _cmd_tail(args) -> int:
     cmd = list(getattr(args, "command", None) or [])
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
-    grace_secs, stall_secs = _grace_stall_secs(args)
-    interval = keepalive_interval_secs(grace_secs, stall_secs)
+    interval = _resolve_keepalive_secs(args)   # FR-58a: ~45s, decoupled from stall/3
     success_re = __import__("re").compile(args.success_regex) if args.success_regex else None
     failure_re = __import__("re").compile(args.failure_regex) if args.failure_regex else None
 
@@ -678,6 +708,8 @@ def _cmd_tail(args) -> int:
         print(f"{_NAME} tail: no doneness signal (need a command, --pid, "
               f"--sentinel-file, or a marker regex)", file=sys.stderr)
         return 64
+    watcher.poll(_now())                     # prime the activity matcher, then
+    ka.emit_first(_now())                    # FR-58a: first scan right after STARTING
     while terminal is None:
         terminal = watcher.poll(_now())     # FR-56: now feeds the activity matcher
         if terminal is not None:
@@ -730,6 +762,9 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="first keepalive lands within this (default 10)")
     wr.add_argument("--stall-threshold-minutes", type=int, default=None,
                     help="keepalives fire at <= 1/3 of this (default 45)")
+    wr.add_argument("--keepalive-seconds", type=float, default=None,
+                    help="FR-58a: activity-refresh / IN_PROGRESS interval, "
+                         "decoupled from stall/3 (default ~45s; 1s floor)")
     wr.add_argument("--capture-file", default=None,
                     help="where to capture child stdout+stderr "
                          "(default <heartbeat-dir>/wrap.out)")
@@ -757,6 +792,9 @@ def _build_parser() -> argparse.ArgumentParser:
                          "(the engine's dead-PID reap backstop)")
     ta.add_argument("--launch-grace-minutes", type=int, default=None)
     ta.add_argument("--stall-threshold-minutes", type=int, default=None)
+    ta.add_argument("--keepalive-seconds", type=float, default=None,
+                    help="FR-58a: activity-refresh / IN_PROGRESS interval, "
+                         "decoupled from stall/3 (default ~45s; 1s floor)")
     ta.add_argument("--activity-regex", action="append", default=None,
                     help="FR-56: show the most-recent log line matching this as "
                          "the ACTIVITY label (display-only; repeatable)")

@@ -216,7 +216,8 @@ class EndToEnd(unittest.TestCase):
         subprocess.run(
             [sys.executable, str(_ROOT / "arunner" / "engine" / "heartbeat.py"),
              "wrap", "--task-id", "w", "--heartbeat-path", str(hb),
-             "--launch-grace-minutes", "0", "--activity-regex", r"step \d+",
+             "--launch-grace-minutes", "0", "--keepalive-seconds", "0.3",
+             "--activity-regex", r"step \d+",
              "--", sys.executable, str(stub), "--emit", "log", "--noise", "2", "--steps", "6", "--sleep", "0.5"],
             capture_output=True, timeout=40)
         labels = self._hb_inprogress_labels(hb)
@@ -236,7 +237,8 @@ class EndToEnd(unittest.TestCase):
         subprocess.run(
             [sys.executable, str(_ROOT / "arunner" / "engine" / "heartbeat.py"),
              "tail", "--task-id", "t", "--heartbeat-path", str(hb),
-             "--launch-grace-minutes", "0", "--log-file", str(log),
+             "--launch-grace-minutes", "0", "--keepalive-seconds", "0.3",
+             "--log-file", str(log),
              "--success-regex", r"\[COMPLETED\]", "--activity-regex", r"step \d+",
              "--", sys.executable, str(stub), "--emit", "log",
              "--log-file", str(log), "--noise", "2", "--steps", "4",

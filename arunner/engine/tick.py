@@ -58,6 +58,7 @@ DEFAULT_TICK_INTERVAL_MINUTES = 10
 DEFAULT_STALL_THRESHOLD_MINUTES = 45      # design §Open questions #5 / Risks
 DEFAULT_LAUNCH_GRACE_MINUTES = 10         # claimed + no heartbeat past this ⇒ launch failed
 DEFAULT_IDLE_TICK_MULTIPLIER = 1          # >1 lengthens cadence when nothing is running
+DEFAULT_KEEPALIVE_SECONDS = 45            # FR-58a: activity-refresh cadence (adapter keepalive)
 
 TAIL_LINES = 20
 _TERMINAL_HB = ("COMPLETED", "FAILED", "ABANDONED")
@@ -1002,7 +1003,7 @@ def tick(run_dir: Path) -> dict:
         try:
             _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall)
             if not paused:
-                dispatch_list = _dispatch(run_dir, runs, entries, pool_size, now)
+                dispatch_list = _dispatch(run_dir, runs, entries, pool_size, now, plan)
         except Exception:  # never let a transition crash the loop
             _log(run_dir, "TICK ERROR:\n" + traceback.format_exc())
         if suppress_stall:
@@ -1150,18 +1151,39 @@ def _resolve_template(tpl: str, values: dict) -> str:
 _VALID_ADAPTERS = ("wrap", "tail")
 
 
-def _adapter_worker_cmd(entry: dict):
+def _adapter_worker_cmd(entry: dict, plan: dict = None):
     """FR-41 selector: synthesize the shell worker_cmd for an entry that
     declares ``adapter: "wrap"|"tail"`` — so the operator declares intent in
     ONE place (the command for wrap, or the log path + optional markers for
     tail) and never hand-wires the heartbeat.py invocation. Returns a token
     list (with placeholders the dispatch resolver fills), or None when no
-    adapter is declared."""
+    adapter is declared.
+
+    FR-58a: synthesize ``--launch-grace-minutes`` / ``--stall-threshold-minutes``
+    / ``--keepalive-seconds`` from the entry (override) or the plan, so all three
+    flow to the adapter. Before this they were NEVER synthesized — the adapter
+    fell back to hardcoded 10/45 and a ~10-min keepalive, making the plan's
+    grace/stall inert for adapter jobs and the FR-56 activity patterns never fire
+    on a normal-length job. (Entry-level wins over plan-level wins over default.)"""
     adapter = entry.get("adapter")
     if not adapter:
         return None
+    plan = plan or {}
+
+    def _knob(name, default):
+        v = entry.get(name)
+        if v is None:
+            v = plan.get(name)
+        return default if v is None else v
+
+    grace = _knob("launch_grace_minutes", DEFAULT_LAUNCH_GRACE_MINUTES)
+    stall = _knob("stall_threshold_minutes", DEFAULT_STALL_THRESHOLD_MINUTES)
+    keepalive = _knob("keepalive_seconds", DEFAULT_KEEPALIVE_SECONDS)
     helper = ["python3", "{HARNESS_BIN}/heartbeat.py", str(adapter),
-              "--task-id", "{TASK_ID}", "--heartbeat-path", "{HEARTBEAT_PATH}"]
+              "--task-id", "{TASK_ID}", "--heartbeat-path", "{HEARTBEAT_PATH}",
+              "--launch-grace-minutes", str(grace),
+              "--stall-threshold-minutes", str(stall),
+              "--keepalive-seconds", str(keepalive)]
     # FR-56: operator activity patterns -> repeated --activity-regex (BOTH
     # adapters). Passed as argv elements, never through a shell. (Footgun, not
     # injection: a pattern containing a literal {PLACEHOLDER}-shaped token would
@@ -1189,7 +1211,7 @@ def _adapter_worker_cmd(entry: dict):
     return None
 
 
-def _dispatch(run_dir, runs, entries, pool_size, now) -> list[dict]:
+def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
     """Emit dispatch entries for queued runs while a pool slot is free.
     Guarded: a run already past queued is never re-dispatched.
 
@@ -1208,7 +1230,7 @@ def _dispatch(run_dir, runs, entries, pool_size, now) -> list[dict]:
         if inflight >= pool_size:
             break
         entry = entries[name]
-        adapter_cmd = _adapter_worker_cmd(entry)   # FR-41: synthesized if adapter set
+        adapter_cmd = _adapter_worker_cmd(entry, plan)   # FR-41/58a: synthesized if adapter set
         mode = "shell" if adapter_cmd is not None else entry.get("dispatch_mode", "subagent")
         values = {
             "HEARTBEAT_PATH": str(_heartbeat_path(run_dir, name)),
@@ -1722,6 +1744,38 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
         return problems                      # nothing per-entry to check
     for i, e in enumerate(entries):
         problems.extend(_check_entry(i, e, run_auth))
+
+    # FR-58a: the keepalive/activity-refresh interval must land WITHIN launch
+    # grace (else the first IN_PROGRESS never beats LAUNCH-FAIL). Fail-loud at
+    # --check, plan-level + per-entry override; explicit-override-wins; the 1s
+    # floor is applied at runtime (Postel), so only keepalive>grace is rejected.
+    plan_grace = plan.get("launch_grace_minutes", DEFAULT_LAUNCH_GRACE_MINUTES)
+
+    def _ka_problem(tag, ka, grace_min):
+        try:
+            ka = float(ka)
+        except (TypeError, ValueError):
+            return "%s.keepalive_seconds: must be a number (got %r)" % (tag, ka)
+        try:
+            gmin = float(grace_min)
+        except (TypeError, ValueError):
+            return None                      # bad grace is flagged elsewhere
+        if ka > gmin * 60:
+            return ("%s.keepalive_seconds: %g exceeds launch grace %g min "
+                    "(%g s) -- the first keepalive would never beat LAUNCH-FAIL"
+                    % (tag, ka, gmin, gmin * 60))
+        return None
+
+    if "keepalive_seconds" in plan:
+        prob = _ka_problem("plan", plan["keepalive_seconds"], plan_grace)
+        if prob:
+            problems.append(prob)
+    for i, e in enumerate(entries):
+        if isinstance(e, dict) and "keepalive_seconds" in e:
+            eg = e.get("launch_grace_minutes", plan_grace)
+            prob = _ka_problem("entries[%d]" % i, e["keepalive_seconds"], eg)
+            if prob:
+                problems.append(prob)
     return problems
 
 
