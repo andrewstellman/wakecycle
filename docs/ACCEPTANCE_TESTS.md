@@ -25,7 +25,7 @@ For each: prepare the plan, drive it at the listed rung performing any control a
 
 **Two non-negotiable execution rules (a capable agent will otherwise shortcut both — observed 2026-06-14):**
 
-1. **Surface the table — drive like an operator, not a grader.** Run each tick so its **status table prints verbatim**. Do NOT capture the engine's stdout into a variable or suppress it (no `R=$(… tick.py …)`, no `2>/dev/null`). The operator watches the per-tick `RUN / STATE / ACTIVITY / LAST-HB` table — for UC-1/UC-2 that streaming table *is* the use case. A run that silently captures-and-checks has graded the disk but skipped the lived experience the test exists to verify.
+1. **Surface the table — drive like an operator, not a grader.** Run each tick so its **status table prints verbatim**. Do NOT capture the engine's stdout into a variable or suppress it (no `R=$(… tick.py …)`, no `2>/dev/null`). The operator watches the per-tick `RUN / STATE / ACTIVITY / LAST-HB` table — for UC-1/UC-2 that streaming table *is* the use case. **For rung-1 (`tick.py`) cases the table is the `status_table` field of each tick's JSON — print that field every tick** (e.g. `python3 arunner/engine/tick.py <run-dir> | python3 -c "import sys,json;print(json.load(sys.stdin)['status_table'])"`); the ticker (UC-5/6/7) prints its table directly. A run that silently captures-and-checks has graded the disk but skipped the lived experience the test exists to verify.
 2. **Grade with the checker CLI, not by eyeballing the status JSON.** Use `python tests/integration/checker.py <run-dir> <expected.json>` (exit 0 = pass) for every objective verdict — do not substitute your own read of `harness_status.json`.
 
 Agent-facing steps:

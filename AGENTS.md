@@ -138,7 +138,11 @@ Procedure — read `docs/ACCEPTANCE_TESTS.md`, then for each use case:
    status table PRINTS VERBATIM — do NOT capture engine output into a variable
    or suppress it (no `R=$(…)`, no `2>/dev/null`).** The operator watches the
    per-tick `RUN / STATE / ACTIVITY / LAST-HB` table; for UC-1/UC-2 that
-   streaming table *is* the use case. Capturing-and-checking silently fails it.
+   streaming table *is* the use case. For **rung-1 (`tick.py`)** cases the table
+   is the **`status_table` field of each tick's JSON** — print that field every
+   tick (`… tick.py <run-dir> | python3 -c "import sys,json;print(json.load(sys.stdin)['status_table'])"`);
+   the ticker (UC-5/6/7) prints its table directly. Capturing-and-checking
+   silently fails it.
 3. Grade the run-dir **with the checker CLI** (do not substitute your own read
    of `harness_status.json`):
    ```bash
