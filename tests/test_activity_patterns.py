@@ -188,9 +188,10 @@ class DonenessFirewall(unittest.TestCase):
 
 
 class EndToEnd(unittest.TestCase):
-    """Drive the REAL wrap/tail adapter subprocess (grace 0 -> a 1s keepalive)
-    with the cross-platform simulator emitting relevant lines amid --noise, and
-    assert the emitted ACTIVITY label is the RELEVANT line, never the noise."""
+    """Drive the REAL wrap/tail adapter subprocess (FR-58a: an explicit fast
+    --keepalive-seconds drives the cadence, decoupled from grace) with the
+    cross-platform simulator emitting relevant lines amid --noise, and assert
+    the emitted ACTIVITY label is the RELEVANT line, never the noise."""
 
     def _hb_inprogress_labels(self, hb):
         import json
