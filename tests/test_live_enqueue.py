@@ -195,6 +195,31 @@ class StageAndAbsorb(_Base):
         self.assertTrue(final2["done"])
         self.assertEqual(final2["counts"]["completed"], 2)
 
+    def test_stop_tick_does_not_absorb(self):               # PIN (STOP read-only)
+        # FR-10/FR-35: a STOP tick is fully read-only -- a staged add must wait
+        # UNTOUCHED in incoming/ while STOP is present (absorbing on a STOP tick
+        # would mutate plan.json/harness_status.json + consume the staged file).
+        rd = self._init({"pool_size": 2, "entries": [_wrap_entry("a")]})
+        self._add(rd, [str(self._stage_file([_wrap_entry("b")]))])
+        (rd / "STOP").write_text("", encoding="utf-8")
+        plan_before = (rd / "plan.json").read_bytes()
+        status_before = (rd / "harness_status.json").read_bytes()
+        env = dict(os.environ, ARUNNER_RUNS_DIR=str(self.runs))
+        subprocess.run([sys.executable, str(_TICK), str(rd)], env=env,
+                       capture_output=True, timeout=60)
+        # nothing mutated, the staged add survives
+        self.assertEqual((rd / "plan.json").read_bytes(), plan_before,
+                         "STOP tick absorbed (mutated plan.json) -- not read-only")
+        self.assertEqual((rd / "harness_status.json").read_bytes(), status_before)
+        self.assertEqual(len(list((rd / "incoming").glob("*.json"))), 1,
+                         "STOP tick consumed the staged add")
+        # clearing STOP lets the NEXT tick absorb it
+        (rd / "STOP").unlink()
+        subprocess.run([sys.executable, str(_TICK), str(rd)], env=env,
+                       capture_output=True, timeout=60)
+        self.assertEqual(
+            len(json.loads((rd / "plan.json").read_text())["entries"]), 2)
+
     def test_two_staged_adds_absorb_in_order(self):
         # concurrent-add safety: multiple staged files all absorb under the lock,
         # append-only, none clobbered.

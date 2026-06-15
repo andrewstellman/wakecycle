@@ -950,7 +950,11 @@ def _append_journal(run_dir: Path, cont: dict, cycle: int) -> None:
 def tick(run_dir: Path) -> dict:
     # FR-57: absorb any live-staged adds FIRST, under the caller's .tick.lock,
     # so the positional work-table rebuild below sees the appended entries.
-    _absorb_incoming(run_dir)
+    # FR-10/FR-35: a STOP tick is fully READ-ONLY -- it mutates nothing and
+    # consumes nothing, so the absorb is gated behind STOP-absence (a staged add
+    # waits untouched in incoming/ while STOP is present).
+    if not (run_dir / "STOP").exists():
+        _absorb_incoming(run_dir)
     status = json.loads((run_dir / "harness_status.json").read_text(encoding="utf-8"))
     plan = json.loads((run_dir / "plan.json").read_text(encoding="utf-8"))
     runs = status["runs"]
