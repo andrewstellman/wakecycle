@@ -15,7 +15,9 @@
 | UC | Use case | Acceptance test — the agent… | Rung | Necessary-condition floor (exists) | Run-contexts | Status |
 |----|----------|------------------------------|------|-----------------------------------|--------------|--------|
 | UC-1 | Run a multi-job plan natively | bootstraps a fresh session, drives a stub-worker plan to `done`, checks the run-dir record | in-agent | `autonomous_loop`, `pool_staggered` | per-OS, per-agent | TO BUILD |
+| UC-1 (alt: grow a running batch) | `arunner add`s jobs to a live run; the next tick absorbs them (append-only `run-NN`) and drives the grown batch to `done` (FR-57) | in-agent + ticker | `test_live_enqueue` (stage-and-absorb, append-only) | per-agent | **VERIFIED** (deterministic leg) |
 | UC-2 | Monitor a run in progress | runs a plan, reads the status table each tick, confirms it reflects disk state | in-agent | `test_cli` (status read-only), journey | per-agent | TO BUILD |
+| UC-2 (alt: ACTIVITY moves) | runs an adapter job whose ACTIVITY column refreshes on the `--keepalive-seconds` cadence and tracks the latest relevant line as the job progresses (FR-58a) | in-agent / ticker | `test_activity_cadence` (default-grace path, label-moves) | per-OS | **VERIFIED** (FR-58a engine leg; FR-58b visible-table is per-host DESIGNED) |
 | UC-3 | Halt a run early (STOP) | runs a plan, drops `STOP`, confirms a clean, read-only halt | in-agent | `stop_readonly`, `test_control_files` | per-agent | TO BUILD |
 | UC-4 | Resume after a crash / loop-drop | runs a plan, simulates a drop, re-bootstraps against the run-dir, confirms resume with no double-dispatch | in-agent + ticker | `continuation_crash_then_resume`, `resume_continues` | per-OS, per-agent | TO BUILD |
 | UC-5 | Locked-down host floor | launches the **ticker** in a terminal (no admin), drives a shell-dispatch plan to `done` | ticker (3) | `wrap_adapter_completes`, `tail_adapter_completes` | per-OS (esp. **Windows**) | TO BUILD |
