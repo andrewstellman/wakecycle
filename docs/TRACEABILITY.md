@@ -18,6 +18,7 @@
 | UC-1 (alt: grow a running batch) | `arunner add`s jobs to a live run; the next tick absorbs them (append-only `run-NN`) and drives the grown batch to `done` (FR-57) | in-agent + ticker | `test_live_enqueue` (stage-and-absorb, append-only) | per-agent | **VERIFIED** (deterministic leg) |
 | UC-2 | Monitor a run in progress | runs a plan, reads the status table each tick, confirms it reflects disk state | in-agent | `test_cli` (status read-only), journey | per-agent | TO BUILD |
 | UC-2 (alt: ACTIVITY moves) | runs an adapter job whose ACTIVITY column refreshes on the `--keepalive-seconds` cadence and tracks the latest relevant line as the job progresses (FR-58a) | in-agent / ticker | `test_activity_cadence` (default-grace path, label-moves) | per-OS | **VERIFIED** (FR-58a engine leg; FR-58b visible-table is per-host DESIGNED) |
+| UC-2 (alt: read-only monitor sidecar) | opens `arunner monitor <run-dir>` in a second terminal; confirms it renders the live table from disk and refreshes ACTIVITY/HB-AGE while the orchestrator is blocked — and writes nothing (no `.tick.lock`, no control file, no state mutation) (FR-59) | sidecar (rung-independent) | `test_monitor` (never-writes pin; live-heartbeat vs per-tick-state freshness; shared-renderer-no-fork) | per-OS | TO BUILD |
 | UC-3 | Halt a run early (STOP) | runs a plan, drops `STOP`, confirms a clean, read-only halt | in-agent | `stop_readonly`, `test_control_files` | per-agent | TO BUILD |
 | UC-4 | Resume after a crash / loop-drop | runs a plan, simulates a drop, re-bootstraps against the run-dir, confirms resume with no double-dispatch | in-agent + ticker | `continuation_crash_then_resume`, `resume_continues` | per-OS, per-agent | TO BUILD |
 | UC-5 | Locked-down host floor | launches the **ticker** in a terminal (no admin), drives a shell-dispatch plan to `done` | ticker (3) | `wrap_adapter_completes`, `tail_adapter_completes` | per-OS (esp. **Windows**) | TO BUILD |
@@ -29,7 +30,7 @@
 | UC-11 | Unattended run resists stop-pressure | drives a long stub run; the continuation contract holds; the journal is audited for `CONTINUE`-state yields | in-agent | `continuation_*` (7) + 3-class detector | per-agent | TO BUILD (live audit) |
 | UC-12 | Activity patterns from a noisy tool | runs a wrap/tail job with `adapter_activity_patterns` over noisy output; confirms ACTIVITY shows the relevant line | in-agent + ticker | `sim_wrap_log_noise`, `sim_tail_log_noise`, `test_activity_patterns` | per-OS | TO BUILD |
 
-User stories cluster onto the same use cases: US-1→UC-1, US-2→UC-2, US-3→UC-3, US-4→UC-4, US-5→UC-5, US-6→UC-5/adapters, US-7→UC-1 on a small model (recorded), US-8→UC-8, US-9→every run's disk record, US-10→the §9/`test_positioning_honesty` honesty surface, US-11→UC-11, US-12→UC-12.
+User stories cluster onto the same use cases: US-1→UC-1, US-2→UC-2, US-3→UC-3, US-4→UC-4, US-5→UC-5, US-6→UC-5/adapters, US-7→UC-1 on a small model (recorded), US-8→UC-8, US-9→every run's disk record, US-10→the §9/`test_positioning_honesty` honesty surface, US-11→UC-11, US-12→UC-12, US-13→UC-1, US-14→UC-2, US-15→UC-2 (read-only monitor sidecar).
 
 ## What "TO BUILD" means here
 
