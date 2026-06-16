@@ -23,9 +23,11 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from arunner import __version__
@@ -114,6 +116,121 @@ def cmd_stop(args) -> int:
     (run_dir / "STOP").write_text("", encoding="utf-8")     # FR-10
     print("arunner: wrote STOP to %s; the next tick halts cleanly." % run_dir)
     return 0
+
+
+# --- FR-59: read-only disk monitor (`arunner monitor`) ---------------------
+# A strictly read-only sidecar: reload the externalized run state and re-render
+# the SHARED `_format_table` every interval, so an operator can watch a run from
+# a second terminal even while the orchestrator is blocked on a long synchronous
+# subagent (C-6). It writes NOTHING, takes no `.tick.lock`, drops no control
+# file, advances no tick -- safe alongside a live engine on any rung.
+_ANSI_CLEAR = "\033[H\033[2J"
+_MONITOR_MIN_INTERVAL = 0.05
+
+
+def _monitor_now() -> float:
+    """Wall-clock epoch, honoring ARUNNER_NOW (the engine's clock seam) so the
+    'as of last tick' age is deterministically testable."""
+    override = os.environ.get("ARUNNER_NOW")
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            pass
+    return time.time()
+
+
+def _age_str(secs: float) -> str:
+    s = max(0, int(secs))
+    if s < 90:
+        return "%ds" % s
+    if s < 5400:
+        return "%dm" % (s // 60)
+    return "%dh" % (s // 3600)
+
+
+def _status_age_secs(status, status_path, now) -> float:
+    """Age of the run *lifecycle* state: prefer the engine's explicit per-tick
+    `last_tick_wall` stamp; else the file mtime."""
+    ts = status.get("last_tick_wall")
+    if not isinstance(ts, (int, float)):
+        try:
+            ts = Path(status_path).stat().st_mtime
+        except OSError:
+            return 0.0
+    return max(0.0, float(now) - float(ts))
+
+
+def _monitor_freshness_line(run_dir, status, status_path, interval, now) -> str:
+    """The monitor-OWNED honesty line printed AROUND the shared table (never
+    edits `_format_table`'s body): the fast display refresh must not imply the
+    lifecycle columns are fresher than the last engine tick (NFR-12)."""
+    age = _age_str(_status_age_secs(status, status_path, now))
+    return ("monitor: refresh %.1fs | run-state as of last tick: %s ago | "
+            "ACTIVITY/HB-AGE: live (Ctrl-C to exit)" % (interval, age))
+
+
+def render_monitor_frame(run_dir, interval=2.0, now=None):
+    """Render ONE read-only monitor frame from disk. Returns
+    (text, terminal, ok): ok=False on a transient read failure (the caller skips
+    the frame and keeps the last good render). STRICTLY READ-ONLY -- the only fs
+    ops are reads of harness_status.json / plan.json / heartbeats (the last
+    inside `_format_table`) plus a STOP-existence check."""
+    run_dir = Path(run_dir)
+    sp = run_dir / "harness_status.json"
+    pp = run_dir / "plan.json"
+    now = _monitor_now() if now is None else now
+    try:
+        status = json.loads(sp.read_text(encoding="utf-8"))
+        plan = json.loads(pp.read_text(encoding="utf-8")) if pp.is_file() else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None, False, False                 # skip this frame, never crash
+    terminal = (bool(status.get("done")) or bool(status.get("stop"))
+                or (run_dir / "STOP").exists())
+    table = TICK._format_table(run_dir, status, plan, terminal=terminal)
+    header = _monitor_freshness_line(run_dir, status, sp, interval, now)
+    return header + "\n" + table, terminal, True
+
+
+def cmd_monitor(args) -> int:
+    run_dir = Path(args.run_dir).resolve()
+    interval = max(_MONITOR_MIN_INTERVAL, float(args.interval))
+    clear = not args.no_clear
+    sp = run_dir / "harness_status.json"
+    if args.once and not sp.is_file():
+        print("arunner: no run at %s (no harness_status.json)" % run_dir,
+              file=sys.stderr)
+        return 2
+    last_good = None
+    waited = 0.0
+    try:
+        while True:
+            text, terminal, ok = render_monitor_frame(run_dir, interval=interval)
+            if ok:
+                last_good = text
+                frame = text
+                waited = 0.0
+            elif last_good is not None:
+                frame = last_good                 # keep the last good render
+            else:
+                frame = "arunner monitor: waiting for run state at %s ..." % run_dir
+                waited += interval
+            if clear:
+                sys.stdout.write(_ANSI_CLEAR)
+            else:
+                sys.stdout.write("\n" + ("-" * 60) + "\n")
+            sys.stdout.write(frame + "\n")
+            sys.stdout.flush()
+            if ok and terminal:
+                return 0                          # final frame rendered; exit
+            if args.once:
+                return 0 if ok else 0             # one frame (waiting msg is fine)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        # leave the cursor sane; no traceback
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+        return 0
 
 
 def cmd_resume(args) -> int:
@@ -312,12 +429,27 @@ def _build_parser() -> argparse.ArgumentParser:
                     help="raise the live pool_size as part of this add")
     ad.add_argument("--repo", default=".",
                     help="target_repo for a --command job (default: .)")
+
+    mon = sub.add_parser("monitor", help="read-only sidecar: re-render the status "
+                                         "table from disk on an interval (FR-59)")
+    mon.add_argument("run_dir")
+    mon.add_argument("--interval", type=float, default=2.0,
+                     help="seconds between frames (default 2.0; floored small). "
+                          "Refreshes the DISPLAY -- ACTIVITY/HB-AGE are live from "
+                          "the heartbeat files, but lifecycle/counts are only as "
+                          "fresh as the last engine tick (shown in the header).")
+    mon.add_argument("--once", action="store_true",
+                     help="render one snapshot and exit")
+    mon.add_argument("--no-clear", action="store_true",
+                     help="append frames with a separator instead of an ANSI "
+                          "clear (dumb-terminal / piped fallback)")
     return p
 
 
 _DISPATCH = {"run": cmd_run, "status": cmd_status, "stop": cmd_stop,
              "resume": cmd_resume, "summary": cmd_summary, "new": cmd_new,
-             "expand": cmd_expand, "preview": cmd_preview, "add": cmd_add}
+             "expand": cmd_expand, "preview": cmd_preview, "add": cmd_add,
+             "monitor": cmd_monitor}
 
 
 def main(argv=None) -> int:
