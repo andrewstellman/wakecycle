@@ -16,7 +16,8 @@
     },
     "dispatch_mode": {
       "type": "string",
-      "enum": ["subagent"]
+      "enum": ["subagent", "shell"],
+      "description": "FR-62 widens this enum from ['subagent'] to ['subagent','shell'] (a pre-existing gap FR-62 makes reachable): a multi-step entry's per-step sub-run reuses this manifest schema at run-NN/steps/step-MM/manifest.json, and shell/adapter steps need 'shell' representable. Additive enum value; schema_version unchanged."
     },
     "run": {
       "type": "string",
@@ -27,6 +28,16 @@
       "type": "string",
       "pattern": "^job-[0-9]{5,}$",
       "description": "Job id (job-00001, …). The queue→claimed→results file moves key off this."
+    },
+    "step_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "FR-62 (optional): 0-based index of this step within a multi-step entry. Present on per-step sub-run manifests (run-NN/steps/step-MM/manifest.json); absent for single-prompt entries."
+    },
+    "step_count": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "FR-62 (optional): total step count for the entry. Pairs with step_index to render 'step N of M' (FR-27/59)."
     }
   }
 }

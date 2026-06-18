@@ -41,6 +41,16 @@
     },
     "claimed": {
       "description": "Snapshot of the claimed job file at reap (the wrapped plan entry), when it was present."
+    },
+    "input_tokens": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FR-65 (optional): input token count for this run/step, read by the engine from the worker's terminal-or-latest heartbeat `data.usage.input_tokens` at reap (the engine reads EXACTLY data.usage and nothing else in the opaque data object). A TOP-LEVEL property — a sibling of summary/synthesized, NOT nested under claimed. null/absent when the worker reported no usage (rendered '—', never a fabricated 0/estimate, NFR-12). Reporting-only — never interpreted for control flow (FR-18/FR-5 {done,stop} untouched)."
+    },
+    "output_tokens": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "FR-65 (optional): output token count, read from `data.usage.output_tokens` at reap. Top-level sibling of input_tokens (not under claimed); null/absent → '—'. Summed across runs/steps for the entry/run TOKENS roll-up; reporting-only, never control-flow."
     }
   }
 }

@@ -36,12 +36,34 @@
       "default": 1,
       "description": "Lengthens the tick cadence by this factor when nothing is actively running (all waiting/stalled). 1 = uniform cadence."
     },
+    "vars": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "FR-61 (optional): plan-level vars map merged under each entry/step vars for the {key} replace-key pass. Same constraints as entry-level vars (no reserved tokens as values; reserved names not valid keys)."
+    },
+    "allow_reasoning_gates": {
+      "type": "boolean",
+      "default": false,
+      "description": "FR-63 (optional, default false): opt-in required before any reasoning gate (kind:'reasoning') is permitted. Even when true, a reasoning gate is rejected at --check inside a measurement:true run, an FR-51 harness run, or an FR-55-audited run."
+    },
+    "measurement": {
+      "type": "boolean",
+      "default": false,
+      "description": "FR-63 (optional, default false): marks a measurement/benchmark run. When true, only deterministic shell gates are allowed — any reasoning gate is rejected at --check (the one optional AI decision is fenced out of measured runs, NFR-12)."
+    },
     "entries": {
       "type": "array",
       "minItems": 1,
       "items": {
         "type": "object",
-        "required": ["task_id", "target_repo", "dispatch_mode", "worker_prompt"],
+        "required": ["task_id", "target_repo", "dispatch_mode"],
+        "oneOf": [
+          { "title": "Inline prompt entry", "required": ["worker_prompt"] },
+          { "title": "Prompt-from-file entry (FR-61)", "required": ["worker_prompt_file"] },
+          { "title": "Multi-step entry (FR-62)", "required": ["steps"] },
+          { "title": "Adapter entry (FR-40/41)", "required": ["adapter"] }
+        ],
+        "description": "FR-61 constraint relaxation: worker_prompt is no longer unconditionally required. Exactly one prompt-source must be present per entry — inline worker_prompt, worker_prompt_file (FR-61), steps (FR-62), or adapter (FR-40/41) — enforced via oneOf, mirroring heartbeat.schema.json's oneOf. The stdlib `--check` validator (FR-42, NFR-3) is the runtime enforcer; this oneOf documents the contract.",
         "properties": {
           "task_id": {
             "type": "string",
@@ -59,6 +81,55 @@
           "worker_prompt": {
             "type": "string",
             "description": "The worker prompt. MUST contain the {HEARTBEAT_PATH}/{TASK_ID}/{RUN_DIR}/{TARGET_REPO} placeholders (plus {HARNESS_BIN} for the helper/demo-worker location) the tick engine substitutes with absolute paths at dispatch time (Council A-2 / FR-21a — no model-transcribed paths). subagent mode: passed verbatim to the subagent. shell mode: written to queue/job-NNNNN.prompt.txt (quoting/arg-length safety) and referenced by worker_cmd via {PROMPT_FILE}."
+          },
+          "worker_prompt_file": {
+            "type": "string",
+            "description": "FR-61 (optional; mutually exclusive with worker_prompt — both = --check error). Path to a Markdown/text prompt file used instead of inline worker_prompt. Resolved relative to the PLAN FILE's directory (absolute taken as-is) and SNAPSHOTTED into the run-dir at --init (NFR-9 self-sufficient record) — mutating the source afterward never changes the dispatched prompt. The same {HEARTBEAT_PATH}/{TASK_ID}/{RUN_DIR}/{TARGET_REPO}/{HARNESS_BIN} reserved placeholders are substituted at dispatch (FR-21a), after the vars replace-key pass."
+          },
+          "vars": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "FR-61 (optional): a flat operator-declared map substituted into worker_prompt/worker_prompt_file by a designated replace-key pass (literal str.replace of each {key}), run BEFORE the engine's reserved placeholders. Only declared keys are replaced; stray braces are NOT scanned or rejected, so literal single-brace JSON blocks survive unmangled. A vars value may not contain a reserved engine token and a reserved placeholder name is not a valid vars key (both --check errors). May also be set per-step (FR-62) and merged."
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "description": "FR-62 (optional; mutually exclusive with a top-level prompt-source — both = --check error). Ordered sub-runs executed SEQUENTIALLY within the entry, occupying ONE pool slot for the whole sequence. Each step is a full FR-18 sub-run on disk at run-NN/steps/step-MM/ (own manifest.json/heartbeat.ndjson/result, reusing job_manifest.schema.json with dispatch_mode widened to include 'shell'). The engine dispatches only the current step per tick; resume reads step_index and reaps-not-re-runs completed steps (NFR-6).",
+            "items": {
+              "type": "object",
+              "description": "One step. Carries its own prompt-source (worker_prompt or worker_prompt_file) plus optional per-step target_repo/worker_cmd/adapter/vars and an optional gate (FR-63) evaluated before the NEXT step dispatches.",
+              "properties": {
+                "label": { "type": "string", "description": "Short display label shown as 'step N of M' in the status table/monitor (FR-27/59)." },
+                "worker_prompt": { "type": "string", "description": "Inline step prompt (mutually exclusive with worker_prompt_file)." },
+                "worker_prompt_file": { "type": "string", "description": "FR-61 prompt-from-file for this step (mutually exclusive with worker_prompt)." },
+                "target_repo": { "type": "string", "description": "Optional per-step override; defaults to the entry's target_repo." },
+                "worker_cmd": { "type": "array", "items": { "type": "string" }, "description": "Optional per-step shell argv (shell/adapter steps)." },
+                "adapter": { "type": "string", "enum": ["wrap", "tail"], "description": "Optional per-step adapter (FR-40/41)." },
+                "vars": { "type": "object", "additionalProperties": { "type": "string" }, "description": "Optional per-step vars, merged over the entry/plan vars." },
+                "gate": {
+                  "type": "object",
+                  "description": "FR-63 (optional): a continuation gate evaluated after THIS step reaps clean and before the next step dispatches. Recorded as step-MM/gate.json and read-on-resume (never recomputed, NFR-6). Resolves to a FR-64 closed-set outcome.",
+                  "required": ["kind"],
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": ["shell", "reasoning"],
+                      "description": "'shell' (DEFAULT, only kind allowed in measurement runs): operator argv, exit code -> FR-64 outcome, EXIT-CODE ONLY (no stdout/regex interpretation — avoids the engine-parses-text hazard FR-40/41/56). 'reasoning' (OPTIONAL, FENCED): requires plan-level allow_reasoning_gates:true; separate judging context (same-context judge = --check error, FR-51); structured closed-set verdict via FR-18 data; malformed/absent -> internal_error fail-closed; rejected at --check in any measurement/FR-51/FR-55-audited run."
+                    },
+                    "argv": {
+                      "type": "array",
+                      "items": { "type": "string" },
+                      "description": "shell gate: the argv to run (placeholders and vars substituted by the engine). Its exit code maps to the FR-64 outcome."
+                    },
+                    "skip_to": {
+                      "type": "string",
+                      "pattern": "^step-[0-9]{2,}$",
+                      "description": "Optional target for a 'skip-to-next' outcome: skip forward to this named step (skipped steps get a synthesized auditable 'skipped' terminal)."
+                    }
+                  }
+                }
+              }
+            }
           },
           "heartbeat_path": {
             "type": "string",
