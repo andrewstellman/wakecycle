@@ -228,10 +228,7 @@ def _scaffold_run(run_dir: Path, run_name: str, job_id: str, entry: dict) -> dic
     # watches it instead of the run-dir default.
     if entry.get("heartbeat_path"):
         manifest["heartbeat_path"] = entry["heartbeat_path"]
-    _write_json(rd / "manifest.json", manifest)
-    _write_json(run_dir / "queue" / (job_id + ".json"),
-                {"job_id": job_id, "run": run_name, "entry": entry})
-    return {
+    record = {
         "task_id": entry.get("task_id"),
         "job_id": job_id,
         "target_repo": entry.get("target_repo"),
@@ -239,6 +236,21 @@ def _scaffold_run(run_dir: Path, run_name: str, job_id: str, entry: dict) -> dic
         "last_hb_status": None,
         "claimed_at": None,
     }
+    if _is_multistep(entry):
+        # FR-62: a multi-step entry runs steps in one slot. Scaffold the FIRST
+        # step now; record step_index/step_count on the run. Dispatch is
+        # per-step (run-level queue token is unused), so we don't write one.
+        steps = entry["steps"]
+        record["step_index"] = 0
+        record["step_count"] = len(steps)
+        manifest["step_count"] = len(steps)
+        _write_json(rd / "manifest.json", manifest)
+        _scaffold_step(run_dir, run_name, 0, entry, steps[0])
+        return record
+    _write_json(rd / "manifest.json", manifest)
+    _write_json(run_dir / "queue" / (job_id + ".json"),
+                {"job_id": job_id, "run": run_name, "entry": entry})
+    return record
 
 
 def _absorb_incoming(run_dir: Path) -> int:
@@ -599,6 +611,70 @@ def init_run(plan_path: Path) -> Path:
     })
     _log(run_dir, f"init: {len(runs)} run(s) from {plan_path}")
     return run_dir
+
+
+# --- FR-62: multi-step entries (ordered sub-runs) ---------------------------
+# A multi-step entry runs its `steps` SEQUENTIALLY within ONE pool slot. Each
+# step is a full FR-18 sub-run on disk at run-NN/steps/step-MM/ (own heartbeat,
+# manifest, result). The runs-record carries step_index (0-based current) +
+# step_count; the engine dispatches only the CURRENT step per tick and advances
+# only on the predecessor's clean terminal (modulo a FR-63 gate). Resume reads
+# step_index and reaps-not-re-runs completed steps (NFR-6).
+
+def _is_multistep(entry) -> bool:
+    return isinstance(entry, dict) and isinstance(entry.get("steps"), list) \
+        and bool(entry.get("steps"))
+
+
+def _step_name(m: int) -> str:
+    return "step-%02d" % (m + 1)          # m is 0-based; on-disk is 1-based
+
+
+def _step_dir(run_dir: Path, name: str, m: int) -> Path:
+    return run_dir / name / "steps" / _step_name(m)
+
+
+def _step_hb(run_dir: Path, name: str, m: int) -> Path:
+    return _step_dir(run_dir, name, m) / "heartbeat.ndjson"
+
+
+def _run_hb_path(run_dir: Path, name: str, r: dict) -> Path:
+    """The heartbeat file the engine watches for a run: the CURRENT step's for a
+    multi-step run, else the single-prompt default (FR-20 override honored)."""
+    if r.get("step_count"):
+        return _step_hb(run_dir, name, int(r.get("step_index", 0)))
+    return _heartbeat_path(run_dir, name)
+
+
+def _scaffold_step(run_dir: Path, name: str, m: int, entry: dict, step: dict) -> None:
+    """Create run-NN/steps/step-MM/ with its heartbeat + manifest (FR-18 per
+    step, reusing job_manifest.schema.json with the widened dispatch_mode enum).
+    Idempotent: an existing step dir/heartbeat is left untouched (resume-safe)."""
+    sd = _step_dir(run_dir, name, m)
+    sd.mkdir(parents=True, exist_ok=True)
+    hb = sd / "heartbeat.ndjson"
+    if not hb.exists():
+        hb.touch()
+    mf = sd / "manifest.json"
+    if not mf.is_file():
+        _write_json(mf, {
+            "task_id": entry.get("task_id"),
+            "target_repo": step.get("target_repo") or entry.get("target_repo"),
+            "dispatch_mode": ("shell" if step.get("adapter") or step.get("worker_cmd")
+                              else step.get("dispatch_mode", "subagent")),
+            "run": name,
+            "job_id": "%s-%s" % (entry_job_of(name), _step_name(m)),
+            "step_index": m,
+            "step_count": len(entry.get("steps") or []),
+        })
+
+
+def entry_job_of(name: str) -> str:
+    """The entry-level job id for a run-NN (job-00007 for run-07)."""
+    try:
+        return "job-%05d" % int(name.split("-")[-1])
+    except (ValueError, IndexError):
+        return "job-" + name
 
 
 def _recount(runs: dict) -> dict:
@@ -1122,6 +1198,10 @@ def _render_summary_md(payload: dict) -> str:
         lines.append("| %s | %s | %s | %s | %s | %s |" % (
             j["run"], _md_cell(j["task_id"]), j["state"], dur,
             _md_cell(j["result_file"]), _md_cell(j["summary"])))
+        if j.get("steps"):                        # FR-62 per-step statuses
+            lines.append("|   | steps: %s |" % ", ".join(
+                "%s %s" % (s.get("step"), s.get("terminal_status") or "-")
+                for s in j["steps"]))
     c = payload["counts"]
     lines += ["",
               "**Totals** - completed: %d, failed: %d, abandoned: %d, "
@@ -1152,14 +1232,21 @@ def _write_summary(run_dir: Path, status: dict) -> None:
         duration = (max(0.0, round(reaped - int(claimed_at), 1))
                     if isinstance(claimed_at, (int, float)) and reaped is not None
                     else None)
-        jobs.append({
+        job = {
             "run": name,
             "task_id": r.get("task_id"),
             "state": r.get("state"),
             "result_file": (rec or {}).get("result_file"),
             "summary": (rec or {}).get("summary"),
             "duration_seconds": duration,
-        })
+        }
+        # FR-62: a multi-step entry lists per-step statuses in the SUMMARY.
+        if r.get("step_count"):
+            job["steps"] = [{"step": s.get("step"),
+                             "terminal_status": s.get("terminal_status")}
+                            for s in _collect_step_results(run_dir, name,
+                                                           int(r["step_count"]))]
+        jobs.append(job)
     payload = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "run_dir": run_dir.name,
@@ -1357,7 +1444,8 @@ def tick(run_dir: Path) -> dict:
         # the persist below, so it never becomes sticky (one-shot).
         poll_now = bool(status.pop("_poll_now", False))
         try:
-            _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall)
+            _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall,
+                     entries, plan)
             if not paused:
                 dispatch_list = _dispatch(run_dir, runs, entries, pool_size, now, plan)
         except Exception:  # never let a transition crash the loop
@@ -1421,16 +1509,27 @@ def tick(run_dir: Path) -> dict:
     }
 
 
-def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False):
+def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
+             entries=None, plan=None):
     """Reap terminals, detect stalls and launch failures. Mutates run
     state + disk. Every transition is guarded for idempotency.
 
     ``suppress_stall`` (E2): set when this tick detected a wall-clock jump
     (machine slept/hibernated) — heartbeat ages are inflated this tick, so
-    STALLED marking is skipped to avoid false stalls."""
+    STALLED marking is skipped to avoid false stalls.
+
+    FR-62: a multi-step run (entry has ``steps``) is advanced by
+    ``_advance_multistep`` -- scoped to its current step's sub-run."""
+    entries = entries or {}
+    plan = plan or {}
     for name, r in runs.items():
         state = r["state"]
         if state in _TERMINAL_STATES:
+            continue
+        entry = entries.get(name)
+        if _is_multistep(entry):
+            _advance_multistep(run_dir, name, r, entry, now, stall_secs,
+                               grace_secs, suppress_stall, plan)
             continue
         hb = _heartbeat_path(run_dir, name)
         has_any, last_status, _activity, mtime = _hb_observe(hb)
@@ -1507,6 +1606,236 @@ def _resolve_template(tpl: str, values: dict) -> str:
     return out
 
 
+# --- FR-62/63/64: multi-step advance + gate evaluation ----------------------
+
+def _usage_of(hb: Path) -> dict:
+    """FR-65: read EXACTLY ``data.usage = {input_tokens, output_tokens}`` from the
+    terminal-or-latest heartbeat into top-level token fields. Reporting-only;
+    nothing else in the opaque ``data`` is read. Malformed/absent -> {} (the
+    caller renders '-' / 'partial', never a fabricated 0)."""
+    out = {}
+    for ln in reversed(_tail(hb)):
+        try:
+            obj = json.loads(ln)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        usage = obj.get("data", {}).get("usage") if isinstance(obj.get("data"), dict) else None
+        if isinstance(usage, dict):
+            for k in ("input_tokens", "output_tokens"):
+                v = usage.get(k)
+                if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+                    out[k] = v
+            if out:
+                return out
+    return out
+
+
+def _evaluate_gate(run_dir, name, m, step, entry, plan) -> str:
+    """FR-63/64: resolve the gate after step ``m`` completed clean -> a closed-set
+    FR-64 outcome string. No gate -> 'continue'. (Shell + reasoning kinds are
+    filled in by the FR-63 checkpoint; until then any declared gate continues.)"""
+    if not (isinstance(step, dict) and isinstance(step.get("gate"), dict)):
+        return "continue"
+    return "continue"
+
+
+def _lock_pid_step(run_dir: Path, name: str, m: int):
+    lock = _step_dir(run_dir, name, m) / "claim.lock"
+    if not lock.is_file():
+        return None
+    try:
+        return json.loads(lock.read_text(encoding="utf-8", errors="replace")).get("pid")
+    except (OSError, ValueError):
+        return None
+
+
+def _reap_step(run_dir: Path, name: str, m: int, terminal: str, hb: Path) -> None:
+    """Write run-NN/steps/step-MM/result.json from the step's terminal sentinel.
+    Idempotent (resume reads it; a reaped step is never re-run -- NFR-6)."""
+    rp = _step_dir(run_dir, name, m) / "result.json"
+    if rp.exists():
+        return
+    meta = _result_meta(hb)
+    rec = {"step": _step_name(m), "step_index": m, "terminal_status": terminal,
+           "result_file": meta.get("result_file"), "summary": meta.get("summary"),
+           "reaped_ts": _utc_iso()}
+    usage = _usage_of(hb)                              # FR-65 per-step tokens
+    if usage:
+        rec.update(usage)
+    _write_json(rp, rec)
+
+
+def _reap_step_synth(run_dir: Path, name: str, m: int, terminal: str, summary: str) -> None:
+    """Synthesized step result (no worker terminal heartbeat -- launch fail /
+    dead PID). Idempotent."""
+    rp = _step_dir(run_dir, name, m) / "result.json"
+    if rp.exists():
+        return
+    _write_json(rp, {"step": _step_name(m), "step_index": m,
+                     "terminal_status": terminal, "result_file": None,
+                     "summary": summary, "reaped_ts": _utc_iso(),
+                     "synthesized": True})
+
+
+def _collect_step_results(run_dir: Path, name: str, count: int) -> list:
+    out = []
+    for m in range(count):
+        rp = _step_dir(run_dir, name, m) / "result.json"
+        try:
+            out.append(json.loads(rp.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            out.append({"step": _step_name(m), "terminal_status": None})
+    return out
+
+
+def _write_entry_result(run_dir: Path, name: str, r: dict,
+                        terminal_status: str, summary: str) -> None:
+    """The entry-level results/result-NNNNN.json for a multi-step entry once it
+    reaches a terminal state -- SUMMARY (FR-45) + token roll-up (FR-65) source.
+    Carries the per-step records under ``steps``. Idempotent."""
+    job_id = r["job_id"]
+    rp = run_dir / "results" / (job_id.replace("job-", "result-") + ".json")
+    if rp.exists():
+        return
+    steps = _collect_step_results(run_dir, name, int(r.get("step_count") or 0))
+    rec = {"job_id": job_id, "task_id": r.get("task_id"),
+           "terminal_status": terminal_status, "result_file": None,
+           "summary": summary, "reaped_ts": _utc_iso(), "synthesized": True,
+           "steps": steps}
+    _write_json(rp, rec)
+
+
+def _apply_gate_outcome(run_dir: Path, name: str, r: dict, entry: dict,
+                        m: int, outcome: str, now: float) -> None:
+    """FR-64: apply a gate outcome after step ``m`` completed clean. Closed set:
+    continue / halt / skip-to-next[ :step-MM] / behavior-flag:<name> /
+    internal_error. Advances step_index, synthesizes ``skipped`` terminals,
+    records behavior-flags as next-step vars, or terminals the entry."""
+    steps = entry["steps"]
+    total = len(steps)
+
+    def _advance_to(next_m: int) -> None:
+        if next_m >= total:
+            r["state"] = "completed"
+            _write_entry_result(run_dir, name, r, "COMPLETED",
+                                "all %d step(s) completed" % total)
+            _log(run_dir, "%s: entry COMPLETED (%d steps)" % (name, total))
+        else:
+            r["step_index"] = next_m
+            r["state"] = "queued"
+            r["claimed_at"] = None
+            _scaffold_step(run_dir, name, next_m, entry, steps[next_m])
+            _log(run_dir, "%s: advance to %s" % (name, _step_name(next_m)))
+
+    if outcome == "halt":
+        r["state"] = "failed"
+        _write_entry_result(run_dir, name, r, "FAILED",
+                            "gate halt after %s" % _step_name(m))
+        _log(run_dir, "%s: entry HALTED by gate after %s" % (name, _step_name(m)))
+    elif outcome == "internal_error":
+        r["state"] = "failed"
+        _write_entry_result(run_dir, name, r, "FAILED",
+                            "gate internal_error after %s (fail-closed)" % _step_name(m))
+        _log(run_dir, "%s: entry FAILED (gate internal_error)" % name)
+    elif outcome == "continue":
+        _advance_to(m + 1)
+    elif outcome.startswith("behavior-flag:"):
+        flag = outcome.split(":", 1)[1]
+        flags = r.setdefault("flags", {})
+        flags[flag] = "1"                 # exposed to the next step as a {var}
+        _log(run_dir, "%s: behavior-flag %r set after %s" % (name, flag, _step_name(m)))
+        _advance_to(m + 1)
+    elif outcome == "skip-to-next" or outcome.startswith("skip-to-next:"):
+        target = outcome.split(":", 1)[1] if ":" in outcome else None
+        # default: skip the immediately-following step; or skip forward to a
+        # named step-MM. Skipped steps get a synthesized auditable `skipped`.
+        if target and _STEP_ID_RE.match(target):
+            dest = int(target.split("-")[1]) - 1
+        else:
+            dest = m + 2                  # skip step m+1, resume at m+2
+        for s in range(m + 1, min(dest, total)):
+            _scaffold_step(run_dir, name, s, entry, steps[s])
+            _reap_step_synth(run_dir, name, s, "SKIPPED",
+                             "skipped by gate after %s" % _step_name(m))
+            _log(run_dir, "%s: %s skipped by gate" % (name, _step_name(s)))
+        _advance_to(min(dest, total))
+    else:
+        # out-of-set -> fail-closed internal_error (defense in depth)
+        _apply_gate_outcome(run_dir, name, r, entry, m, "internal_error", now)
+
+
+def _advance_multistep(run_dir, name, r, entry, now, stall_secs, grace_secs,
+                       suppress_stall, plan):
+    """FR-62: reap/advance ONE multi-step run. Mirrors _advance but scoped to the
+    current step's sub-run, advancing step_index on a clean terminal (via the
+    FR-63 gate). Idempotent; a terminal entry is skipped."""
+    state = r["state"]
+    if state in _TERMINAL_STATES:
+        return
+    m = int(r.get("step_index", 0))
+    steps = entry["steps"]
+    if m >= len(steps):                      # defensive: nothing to advance
+        return
+    step = steps[m]
+    if state == "queued":
+        return                               # not yet dispatched -> _dispatch
+    hb = _step_hb(run_dir, name, m)
+    has_any, last_status, _activity, mtime = _hb_observe(hb)
+    if has_any:
+        r["last_hb_status"] = last_status
+    bad = _count_malformed(hb)
+    if bad:
+        _log(run_dir, "%s/%s: WARN %d malformed heartbeat line(s) skipped"
+             % (name, _step_name(m), bad))
+    terminal = _terminal_status_of(hb)
+    if terminal is not None:
+        _reap_step(run_dir, name, m, terminal, hb)
+        if terminal in ("FAILED", "ABANDONED"):
+            r["state"] = "failed"
+            _write_entry_result(run_dir, name, r, "FAILED",
+                                "%s %s" % (_step_name(m), terminal))
+            _log(run_dir, "%s: entry FAILED at %s (%s)"
+                 % (name, _step_name(m), terminal))
+            return
+        outcome = _evaluate_gate(run_dir, name, m, step, entry, plan)
+        _apply_gate_outcome(run_dir, name, r, entry, m, outcome, now)
+        return
+    # no terminal: dead-PID (shell), launch grace, stall -- scoped to the step
+    pid = _lock_pid_step(run_dir, name, m)
+    if pid is not None and not _pid_alive(pid):
+        _reap_step_synth(run_dir, name, m, "FAILED",
+                         "shell step process %s exited without a terminal "
+                         "heartbeat" % pid)
+        r["state"] = "failed"
+        _write_entry_result(run_dir, name, r, "FAILED",
+                            "%s shell process died" % _step_name(m))
+        _log(run_dir, "%s: entry FAILED (%s dead PID %s)" % (name, _step_name(m), pid))
+        return
+    if state == "claimed" and not has_any:
+        claimed_at = r.get("claimed_at")
+        if claimed_at is None:
+            r["claimed_at"] = now
+        elif (now - claimed_at) > grace_secs:
+            _reap_step_synth(run_dir, name, m, "FAILED", _LAUNCH_FAIL_HINT)
+            r["state"] = "auth_or_launch_failed"
+            _write_entry_result(run_dir, name, r, "FAILED",
+                                "%s launch failed" % _step_name(m))
+            _log(run_dir, "%s: AUTH_OR_LAUNCH_FAILED at %s" % (name, _step_name(m)))
+        return
+    if has_any:
+        if mtime is None:
+            pass
+        elif (now - mtime) > stall_secs and not suppress_stall:
+            if r["state"] != "stalled":
+                r["state"] = "stalled"
+                _log(run_dir, "%s/%s: STALLED" % (name, _step_name(m)))
+        else:
+            if r["state"] in ("claimed", "stalled"):
+                r["state"] = "running"
+
+
 _VALID_ADAPTERS = ("wrap", "tail")
 
 
@@ -1570,6 +1899,66 @@ def _adapter_worker_cmd(entry: dict, plan: dict = None):
     return None
 
 
+def _holds_slot(r: dict) -> bool:
+    """FR-62: a run occupies a pool slot if it is in-flight OR a multi-step run
+    that has STARTED and is not yet terminal (it keeps its one slot across the
+    whole step sequence, including the brief between-steps ``queued`` window)."""
+    if r["state"] in _INFLIGHT_STATES:
+        return True
+    return bool(r.get("started")) and r["state"] not in _TERMINAL_STATES
+
+
+def _dispatch_step(run_dir, name, r, entry, now, plan) -> dict:
+    """FR-62: dispatch the CURRENT step of a multi-step run as its own sub-run
+    (run-NN/steps/step-MM/). Mirrors the single-prompt dispatch but scoped to the
+    step dir; vars merge plan<entry<step<behavior-flags (FR-61/64)."""
+    m = int(r.get("step_index", 0))
+    step = entry["steps"][m]
+    _scaffold_step(run_dir, name, m, entry, step)        # idempotent
+    sd = _step_dir(run_dir, name, m)
+    adapter_cmd = _adapter_worker_cmd(step, plan)
+    mode = ("shell" if adapter_cmd is not None
+            else ("shell" if step.get("worker_cmd") else step.get("dispatch_mode", "subagent")))
+    values = {
+        "HEARTBEAT_PATH": str(_step_hb(run_dir, name, m)),
+        "TASK_ID": str(entry.get("task_id", "")),
+        "RUN_DIR": str(sd),
+        "TARGET_REPO": str(step.get("target_repo") or entry.get("target_repo", "")),
+        "HARNESS_BIN": _HARNESS_BIN,
+    }
+    # FR-61/64: plan < entry < step vars < behavior-flags recorded by a prior gate.
+    vmap = {}
+    for vsrc in (plan.get("vars"), entry.get("vars"), step.get("vars"), r.get("flags")):
+        if isinstance(vsrc, dict):
+            vmap.update(vsrc)
+    raw = _apply_vars(step.get("worker_prompt", ""), vmap)
+    prompt = _resolve_template(raw, values)
+    r["state"] = "claimed"
+    r["claimed_at"] = now
+    r["started"] = True
+    r["dispatch_mode"] = mode
+    if mode == "shell":
+        prompt_file = sd / "prompt.txt"
+        prompt_file.write_text(prompt, encoding="utf-8")
+        lock_file = sd / "claim.lock"
+        _write_json(lock_file, {"task_id": r["task_id"], "claimed_ts": _utc_iso(),
+                                "dispatched_by": "arunner_tick", "step": _step_name(m),
+                                "dispatch_mode": mode, "pid": None})
+        sh_values = dict(values, PROMPT_FILE=str(prompt_file), LOCK_FILE=str(lock_file))
+        cmd_template = (adapter_cmd if adapter_cmd is not None
+                        else (step.get("worker_cmd") or []))
+        worker_cmd = [_resolve_template(tok, sh_values) for tok in cmd_template]
+        _log(run_dir, "%s: dispatched %s (claimed, shell)" % (name, _step_name(m)))
+        return {"run": name, "step": _step_name(m), "task_id": r["task_id"],
+                "dispatch_mode": "shell", "worker_cmd": worker_cmd,
+                "prompt_file": str(prompt_file), "heartbeat_path": values["HEARTBEAT_PATH"],
+                "run_dir": values["RUN_DIR"], "target_repo": values["TARGET_REPO"],
+                "auth_check": step.get("auth_check")}
+    _log(run_dir, "%s: dispatched %s (claimed, subagent)" % (name, _step_name(m)))
+    return {"run": name, "step": _step_name(m), "task_id": r["task_id"],
+            "dispatch_mode": "subagent", "worker_prompt": prompt}
+
+
 def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
     """Emit dispatch entries for queued runs while a pool slot is free.
     Guarded: a run already past queued is never re-dispatched.
@@ -1579,16 +1968,30 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
     subagent tool. dispatch_mode == "shell": the prompt is written to
     queue/job-NNNNN.prompt.txt (quoting/arg-length safety, FR-15) and the
     entry carries a resolved ``worker_cmd`` argv for the ticker to Popen
-    detached; the placeholder block adds {PROMPT_FILE}."""
-    inflight = sum(1 for r in runs.values() if r["state"] in _INFLIGHT_STATES)
+    detached; the placeholder block adds {PROMPT_FILE}.
+
+    FR-62: a multi-step run dispatches only its CURRENT step; an already-started
+    multi-step run keeps its slot, so advancing to the next step never re-checks
+    the pool (only a FRESH run needs a free slot)."""
+    plan = plan or {}
+    inflight = sum(1 for r in runs.values() if _holds_slot(r))
     out: list[dict] = []
     for name in sorted(runs):
         r = runs[name]
         if r["state"] != "queued":
             continue
-        if inflight >= pool_size:
-            break
         entry = entries[name]
+        # A started multi-step run between steps already holds its slot; a fresh
+        # run needs a free one. (continue, not break -- a later started run may
+        # still be eligible while a fresh one is pool-gated.)
+        fresh = not r.get("started")
+        if fresh and inflight >= pool_size:
+            continue
+        if _is_multistep(entry):
+            out.append(_dispatch_step(run_dir, name, r, entry, now, plan))
+            if fresh:
+                inflight += 1
+            continue
         adapter_cmd = _adapter_worker_cmd(entry, plan)   # FR-41/58a: synthesized if adapter set
         mode = "shell" if adapter_cmd is not None else entry.get("dispatch_mode", "subagent")
         values = {
@@ -1612,6 +2015,7 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
         r["state"] = "claimed"
         r["claimed_at"] = now
         r["dispatch_mode"] = mode
+        r["started"] = True
         inflight += 1
         # FR-61: apply the designated {var} pass BEFORE the reserved placeholders.
         raw = _apply_vars(entry.get("worker_prompt", ""), _entry_vars(plan, entry))
@@ -1686,8 +2090,8 @@ def _next_cadence(status, tick_interval, idle_mult) -> int:
     return max(1, int(tick_interval) * max(1, int(idle_mult)))
 
 
-def _hb_age_str(run_dir, name) -> str:
-    hb = _heartbeat_path(run_dir, name)
+def _hb_age_str(run_dir, name, hb=None) -> str:
+    hb = hb if hb is not None else _heartbeat_path(run_dir, name)
     if not hb.exists():
         return "-"
     try:
@@ -1720,7 +2124,12 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
     any_launch_fail = False
     for name in sorted(status["runs"]):
         r = status["runs"][name]
-        _, _, activity, _ = _hb_observe(_heartbeat_path(run_dir, name))
+        hb = _run_hb_path(run_dir, name, r)          # FR-62: current step's hb
+        _, _, activity, _ = _hb_observe(hb)
+        # FR-62: a multi-step run shows "step N of M" alongside the step label.
+        if r.get("step_count"):
+            tag = "s%d/%d" % (int(r.get("step_index", 0)) + 1, int(r["step_count"]))
+            activity = "%s %s" % (tag, activity) if activity else tag
         st = r["state"]
         if st == "auth_or_launch_failed":
             any_launch_fail = True
@@ -1732,7 +2141,7 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
             _STATE_DISPLAY.get(st, st)[:12],
             _ascii_trunc(activity, 15),
             r.get("last_hb_status") or "-",
-            _hb_age_str(run_dir, name),
+            _hb_age_str(run_dir, name, hb),
         ))
     c = status["counts"]
     rows.append(bar)
