@@ -1822,7 +1822,13 @@ def _evaluate_gate(run_dir, name, m, step, entry, plan, r=None) -> str:
 
 def _eval_shell_gate(run_dir, name, m, step, entry, plan, gate, r) -> str:
     """Run the gate argv; map its EXIT CODE to an FR-64 outcome. exit-code only:
-    no stdout is read (avoids the 'engine parses text' hazard, FR-40/41/56)."""
+    no stdout is read (avoids the 'engine parses text' hazard, FR-40/41/56).
+
+    The gate runs with cwd = the step/entry ``target_repo`` -- where the worker
+    operated and where the artifacts the gate checks live -- so its success never
+    depends on the orchestrator's incidental cwd. (Without this a relative-import
+    or relative-path gate, e.g. `python3 -m bin.validate_phase_artifacts`, false-
+    fails from the engine's cwd; surfaced 2026-06-19 in a QPB regression run.)"""
     argv_tpl = gate.get("argv")
     if not (isinstance(argv_tpl, list) and argv_tpl):
         return "internal_error"
@@ -1831,7 +1837,8 @@ def _eval_shell_gate(run_dir, name, m, step, entry, plan, gate, r) -> str:
     argv = [_resolve_template(_apply_vars(str(tok), vmap), values) for tok in argv_tpl]
     try:
         proc = subprocess.run(argv, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.DEVNULL, timeout=_GATE_TIMEOUT_SECONDS)
+                              stderr=subprocess.DEVNULL, timeout=_GATE_TIMEOUT_SECONDS,
+                              cwd=(values.get("TARGET_REPO") or None))
         rc = proc.returncode
     except (OSError, subprocess.SubprocessError):
         return "internal_error"

@@ -23,6 +23,14 @@ MUTATION-VERIFY EVIDENCE (instr 002):
     Mutation: in _evaluate_gate, skip the `if not _valid_outcome: internal_error`
       coercion. Observed: a bogus outcome is applied instead of fail-closed halt
       and the test FAILs. Restored -> OK.
+  Pin: test_shell_gate_runs_in_target_repo_cwd (instr 003).
+    Mutation: in _eval_shell_gate, remove the `cwd=(values.get("TARGET_REPO")
+      or None)` argument from subprocess.run. Observed: the gate runs from the
+      engine's incidental cwd, the relative-path sentinel is absent -> exit 1 ->
+      unmapped nonzero -> 'halt' (not 'continue'), and the test FAILs. Restored
+      -> OK. (Surfaced 2026-06-19 in a QPB v1.5.10 regression run: a gate
+      `python3 -m bin.validate_phase_artifacts ...` ModuleNotFound'd from the
+      arunner root and false-failed three phases that actually passed.)
 """
 from __future__ import annotations
 
@@ -273,6 +281,27 @@ class ReasoningGateRuntimeTests(_Base):
         T.tick(rd)
         self.assertEqual(self._gate_json(rd, "run-01", 0)["outcome"], "internal_error")
         self.assertEqual(self._status(rd)["runs"]["run-01"]["state"], "failed")
+
+
+class ShellGateCwdTests(_Base):
+    """instr 003: a shell gate runs with cwd = the step/entry target_repo, so its
+    success never depends on the orchestrator's incidental cwd. Uses a SENTINEL
+    file (not os.getcwd()==EXPECT -- /tmp->/private/tmp symlinks on macOS make a
+    path-equality check flaky)."""
+
+    def test_shell_gate_runs_in_target_repo_cwd(self):
+        (self.tmp / "sentinel.txt").write_text("x")     # lives in target_repo
+        argv = [_PY, "-c",
+                "import os,sys; sys.exit(0 if os.path.exists('sentinel.txt') else 1)"]
+        e = {"task_id": "t", "target_repo": str(self.tmp), "dispatch_mode": "subagent",
+             "steps": [_step("a", gate={"kind": "shell", "argv": argv}), _step("b")]}
+        rd = self._init({"pool_size": 1, "entries": [e]})
+        T.tick(rd)
+        self._complete(rd, "run-01", 0)
+        out = T.tick(rd)
+        # cwd=target_repo -> the relative-path sentinel is found -> exit 0 -> continue
+        self.assertEqual(self._gate_json(rd, "run-01", 0)["outcome"], "continue")
+        self.assertEqual([x["step"] for x in out["dispatch_list"]], ["step-02"])
 
 
 if __name__ == "__main__":
