@@ -941,6 +941,12 @@ def _move_to_results(run_dir: Path, run: dict, terminal_status: str,
         "summary": meta.get("summary"),
         "reaped_ts": _utc_iso(),
     }
+    usage = _usage_of(hb)                 # FR-65: top-level input/output_tokens
+    if usage:
+        record.update(usage)
+    elif _usage_malformed(hb):
+        _log(run_dir, "%s: WARN malformed data.usage skipped (FR-65; tokens "
+             "reported as unavailable, not fatal)" % run_name_of(run))
     if src.exists():
         # Capture the claimed manifest, then replace the file with the
         # terminal record at the results path.
@@ -1225,6 +1231,11 @@ def _render_summary_md(payload: dict) -> str:
                   c.get("completed", 0), c.get("failed", 0),
                   c.get("abandoned", 0), c.get("auth_or_launch_failed", 0),
                   len(payload["jobs"]))]
+    tok = payload.get("tokens") or {}        # FR-65: token roll-up (honest)
+    ti, to = tok.get("input_tokens"), tok.get("output_tokens")
+    lines.append("**Tokens** - input: %s, output: %s -- %s" % (
+        "-" if ti is None else ti, "-" if to is None else to,
+        tok.get("label", "no token usage reported")))
     return "\n".join(lines) + "\n"
 
 
@@ -1262,13 +1273,31 @@ def _write_summary(run_dir: Path, status: dict) -> None:
                              "terminal_status": s.get("terminal_status")}
                             for s in _collect_step_results(run_dir, name,
                                                            int(r["step_count"]))]
+        inp, outp = _run_tokens(run_dir, name, r)        # FR-65 per-job tokens
+        job["input_tokens"] = inp
+        job["output_tokens"] = outp
         jobs.append(job)
+    # FR-65: additive roll-up + honest partial labeling (NFR-12).
+    total = [None, None]
+    reported = 0
+    for j in jobs:
+        if j.get("input_tokens") is not None or j.get("output_tokens") is not None:
+            reported += 1
+            _add_tok(total, j)
+    if reported == 0:
+        tok_label = "no token usage reported"
+    elif reported < len(jobs):
+        tok_label = "partial (%d of %d jobs reported)" % (reported, len(jobs))
+    else:
+        tok_label = "%d of %d jobs reported" % (reported, len(jobs))
     payload = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "run_dir": run_dir.name,
         "done": True,
         "generated_ts": _utc_iso(),
         "counts": dict(status.get("counts", {})),
+        "tokens": {"input_tokens": total[0], "output_tokens": total[1],
+                   "reported": reported, "jobs": len(jobs), "label": tok_label},
         "jobs": jobs,
     }
     _write_json(run_dir / "summary.json", payload)
@@ -1683,6 +1712,22 @@ def _persist_gate(run_dir, name, m, record) -> None:
     _write_json(_step_dir(run_dir, name, m) / "gate.json", record)
 
 
+def _usage_malformed(hb: Path) -> bool:
+    """FR-65: a terminal line carries a ``data.usage`` that yields no valid
+    counts -> skipped-with-warning (never fatal)."""
+    for ln in reversed(_tail(hb)):
+        if _status_of_line(ln) in _TERMINAL_HB:
+            try:
+                obj = json.loads(ln)
+            except (ValueError, TypeError):
+                return False
+            data = obj.get("data") if isinstance(obj.get("data"), dict) else {}
+            if "usage" in data and not _usage_of(hb):
+                return True
+            return False
+    return False
+
+
 def _evaluate_gate(run_dir, name, m, step, entry, plan, r=None) -> str:
     """FR-63/64: resolve the gate after step ``m`` completed clean -> a closed-set
     FR-64 outcome. No gate -> 'continue'. A persisted gate.json is read on resume
@@ -1914,6 +1959,13 @@ def _write_entry_result(run_dir: Path, name: str, r: dict,
            "terminal_status": terminal_status, "result_file": None,
            "summary": summary, "reaped_ts": _utc_iso(), "synthesized": True,
            "steps": steps}
+    acc = [None, None]                    # FR-65: additive per-step roll-up
+    for s in steps:
+        _add_tok(acc, s)
+    if acc[0] is not None:
+        rec["input_tokens"] = acc[0]
+    if acc[1] is not None:
+        rec["output_tokens"] = acc[1]
     _write_json(rp, rec)
 
 
@@ -2331,6 +2383,46 @@ def _hb_age_str(run_dir, name, hb=None) -> str:
     return "%dm%02ds" % (age // 60, age % 60)
 
 
+# --- FR-65: token reporting (input + output) --------------------------------
+
+def _add_tok(acc, rec):
+    """Accumulate input/output_tokens from a record into acc (a 2-list of
+    int-or-None). A present int counts; a missing value leaves None so the
+    aggregate stays honestly unreported (NFR-12 -- never a fabricated 0)."""
+    for i, k in enumerate(("input_tokens", "output_tokens")):
+        v = rec.get(k) if isinstance(rec, dict) else None
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            acc[i] = (acc[i] or 0) + v
+
+
+def _run_tokens(run_dir: Path, name: str, r: dict):
+    """(input, output) token totals for a run -- summed across steps for a
+    multi-step entry (per-step result, else the step's live heartbeat), or the
+    single result record / live heartbeat for a single-prompt run. None where
+    unreported (rendered '-', never 0)."""
+    acc = [None, None]
+    if r.get("step_count"):
+        for m in range(int(r["step_count"])):
+            rp = _step_dir(run_dir, name, m) / "result.json"
+            if rp.exists():
+                try:
+                    _add_tok(acc, json.loads(rp.read_text(encoding="utf-8")))
+                except (OSError, ValueError):
+                    pass
+            else:
+                _add_tok(acc, _usage_of(_step_hb(run_dir, name, m)))
+    else:
+        rec = _read_result_record(run_dir, r.get("job_id"))
+        _add_tok(acc, rec if rec else _usage_of(_run_hb_path(run_dir, name, r)))
+    return acc[0], acc[1]
+
+
+def _tokens_cell(inp, out) -> str:
+    if inp is None and out is None:
+        return "-"
+    return "%s/%s" % ("-" if inp is None else inp, "-" if out is None else out)
+
+
 def _ascii_trunc(value, width: int) -> str:
     """Display-only: ASCII-sanitize (cp1252 console safety, NFR-7) and
     truncate a free-form field to the column width. The raw value is
@@ -2344,12 +2436,12 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
     bar = "-" * 86
     # FR-21b: STATE narrowed + abbreviated (LAUNCH-FAIL) so it can't
     # overflow; ACTIVITY (the free-form label) widened and sanitized.
-    fmt = "%-5s%-22s%-8s%-13s%-16s%-13s%s"
+    fmt = "%-5s%-22s%-8s%-13s%-16s%-13s%-9s%s"
     rows = [
         "Run-Dir: %s (cycle %d)" % (run_dir.name, status.get("cycle", 0)),
         bar,
         fmt % ("RUN", "REPO", "MODE", "STATE", "ACTIVITY", "LAST-HB",
-               "HB-AGE"),
+               "HB-AGE", "TOKENS"),
     ]
     any_launch_fail = False
     for name in sorted(status["runs"]):
@@ -2363,6 +2455,7 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
         st = r["state"]
         if st == "auth_or_launch_failed":
             any_launch_fail = True
+        inp, outp = _run_tokens(run_dir, name, r)        # FR-65 TOKENS column
         rows.append(fmt % (
             name[4:],
             _ascii_trunc(r.get("target_repo") or "-", 21),
@@ -2372,6 +2465,7 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
             _ascii_trunc(activity, 15),
             r.get("last_hb_status") or "-",
             _hb_age_str(run_dir, name, hb),
+            _tokens_cell(inp, outp),
         ))
     c = status["counts"]
     rows.append(bar)
