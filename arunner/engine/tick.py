@@ -1598,6 +1598,15 @@ def tick(run_dir: Path) -> dict:
 
     done = status["done"]
     table = _format_table(run_dir, status, plan, terminal=(done or stop))
+    if not (done or stop) and status.get("cycle") == 1:
+        # First-tick operator watch hints (read-only). Appended to the RETURNED
+        # status_table only -- NOT inside _format_table -- so the `monitor` and
+        # `status` commands (which re-render _format_table) don't echo them
+        # recursively. ASCII only (cp1252 consoles, 185 print-path lesson).
+        table += (
+            "\nWatch this run (read-only, separate terminal):"
+            "\n  snapshot: python3 -m arunner status %s"
+            "\n  live:     python3 -m arunner monitor %s" % (run_dir, run_dir))
     return {
         "dispatch_list": dispatch_list,
         "status_table": table,
