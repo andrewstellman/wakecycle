@@ -324,15 +324,24 @@ def check(run_dir, expected):
 
     # 9. no double-dispatch (UC-2 idempotent re-tick, UC-4 resume).  [durable]
     # Idempotency guarantees an entry past `queued` is never re-dispatched
-    # (FR-6) -- so each run was STARTED at most once. A re-dispatch would append
-    # a SECOND STARTING line to that run's heartbeat file (a second worker), so
-    # the durable signal is: every run's heartbeat has <= 1 STARTING line.
+    # (FR-6) -- so each run was DISPATCHED at most once. A re-dispatch appends a
+    # SECOND dispatch marker to that run's heartbeat file.
+    #
+    # FR-72: the engine now writes its OWN ``STARTING`` (label "dispatched to
+    # subagent") on the subagent's behalf at dispatch, IN ADDITION to any
+    # worker-emitted ``STARTING`` (Layer-C convention / the wrap adapter). So a
+    # normal single subagent dispatch legitimately has 2 STARTING lines; counting
+    # all of them would false-flag. Refine the witness to count DISPATCH events:
+    # the engine's dispatch marker is authoritative for subagent runs; fall back
+    # to worker STARTINGs for shell runs (where the engine writes no marker, so a
+    # re-dispatch = a second worker STARTING).
+    _ENGINE_DISPATCH_LABEL = "dispatched to subagent"
     if expected.get("no_double_dispatch"):
         for run in (status.get("runs") or {}):
             hb = os.path.join(run_dir, run, "heartbeat.ndjson")
             if not os.path.isfile(hb):
                 continue
-            starts = 0
+            n_engine = n_worker = 0
             with open(hb, "r", encoding="utf-8", errors="replace") as fh:
                 for ln in fh:
                     ln = ln.strip()
@@ -342,11 +351,16 @@ def check(run_dir, expected):
                         obj = json.loads(ln)
                     except ValueError:
                         continue
-                    if isinstance(obj, dict) and obj.get("status") == "STARTING":
-                        starts += 1
-            if starts > 1:
+                    if not (isinstance(obj, dict) and obj.get("status") == "STARTING"):
+                        continue
+                    if obj.get("label") == _ENGINE_DISPATCH_LABEL:
+                        n_engine += 1
+                    else:
+                        n_worker += 1
+            dispatches = n_engine if n_engine > 0 else n_worker
+            if dispatches > 1:
                 fails.append("double-dispatch: %s was STARTED %d times "
-                             "(expected at most once)" % (run, starts))
+                             "(expected at most once)" % (run, dispatches))
     return fails
 
 

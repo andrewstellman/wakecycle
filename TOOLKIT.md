@@ -222,6 +222,20 @@ plumbing synthesized for you. The last job is `shell` mode — the raw-argv esca
 hatch where **you** wire the heartbeat (`{HEARTBEAT_PATH}` in the `command`); it
 also points the harness at a status file the job already maintains.
 
+> **Subagent-prompt convention (FR-72, Layer C).** An `agent` prompt's **first**
+> action SHOULD be a `STARTING` heartbeat and its **last** a terminal one
+> (`COMPLETED`/`FAILED`) to `{HEARTBEAT_PATH}` — exactly the bookends a worker
+> needs so a clean return is recorded. The engine already writes a `STARTING` on
+> the subagent's behalf at dispatch, and a `mode: agent` worker that is alive but
+> quiet is **never** false-failed: past launch grace it only raises a
+> **non-terminal `NO-HEARTBEAT` advisory** (the engine does not own a subagent
+> the way it owns a `Popen`, so it has no authority to declare it dead on
+> heartbeat absence — the FR-40 no-false-fail invariant extended to subagents).
+> A genuinely-hung subagent is reclaimed only past the generous
+> `subagent_hard_cap_minutes` (default 720 = 12h). Emitting the terminal beat on
+> return is what lets the engine reap the run `completed` instead of leaning on
+> the hard cap.
+
 ## The per-mode `command` contract (read this)
 
 `command` appears in three modes — the contract differs, and the docs state it

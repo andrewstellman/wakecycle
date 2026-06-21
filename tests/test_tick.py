@@ -255,7 +255,10 @@ class StallTests(_Base):
 
 class LaunchFailureTests(_Base):
     def test_no_heartbeat_past_grace_marks_auth_or_launch_failed(self):
-        rd = self._init(_plan([_entry("t-1")], pool_size=1,
+        # FR-72: launch-fail on no-heartbeat-past-grace is SHELL-dispatch only
+        # (the engine owns the Popen). The subagent advisory path is pinned
+        # separately in test_subagent_liveness.py.
+        rd = self._init(_plan([_shell_entry("t-1")], pool_size=1,
                               launch_grace_minutes=10))
         # dispatch at a fixed clock
         os.environ["ARUNNER_NOW"] = "1000000"
@@ -278,8 +281,9 @@ class HardeningTests(_Base):
     def test_claimed_at_none_self_heals_then_grace_applies(self):
         # A claimed run whose claimed_at was lost (hand-edit/anomaly) must
         # NOT be permanently immune to launch-grace: the tick self-heals
-        # claimed_at, and grace then applies from that point.
-        rd = self._init(_plan([_entry("t-1")], pool_size=1,
+        # claimed_at, and grace then applies from that point. (Shell dispatch:
+        # FR-72 makes the grace→terminal path shell-only.)
+        rd = self._init(_plan([_shell_entry("t-1")], pool_size=1,
                               launch_grace_minutes=10))
         os.environ["ARUNNER_NOW"] = "1000000"
         T.tick(rd)  # claim run-01
@@ -477,8 +481,11 @@ class IdempotencyTests(_Base):
     def test_double_tick_is_idempotent(self):
         # pool_size 3 with 2 entries leaves a FREE slot, so a broken state
         # guard would actually re-dispatch a claimed run (the mutation this
-        # pins) rather than being masked by a saturated pool.
-        rd = self._init(_plan([_entry("t-1"), _entry("t-2")], pool_size=3))
+        # pins) rather than being masked by a saturated pool. (Shell dispatch:
+        # FR-72's Layer-B STARTING emit is subagent-only, so a re-tick on a
+        # shell claim stays `claimed` -- isolating the re-dispatch guard from
+        # the legitimate claimed→running advance a STARTING would cause.)
+        rd = self._init(_plan([_shell_entry("t-1"), _shell_entry("t-2")], pool_size=3))
         T.tick(rd)
         before = _status(rd)
         before_counts = dict(before["counts"])
@@ -635,7 +642,8 @@ class LaunchFailDisplayTests(_Base):
     the diagnostic hint travels with the table."""
 
     def test_launch_fail_abbreviated_and_hint_in_table(self):
-        rd = self._init(_plan([_entry("t-1")], pool_size=1,
+        # FR-72: LAUNCH-FAIL on grace is shell-dispatch only.
+        rd = self._init(_plan([_shell_entry("t-1")], pool_size=1,
                               launch_grace_minutes=10))
         os.environ["ARUNNER_NOW"] = "1000000"
         T.tick(rd)
