@@ -293,9 +293,9 @@ class ShellGateCwdTests(_Base):
         (self.tmp / "sentinel.txt").write_text("x")     # lives in target_repo
         argv = [_PY, "-c",
                 "import os,sys; sys.exit(0 if os.path.exists('sentinel.txt') else 1)"]
-        e = {"task_id": "t", "target_repo": str(self.tmp), "dispatch_mode": "subagent",
+        e = {"id": "t", "repo": str(self.tmp), "mode": "pipeline",
              "steps": [_step("a", gate={"kind": "shell", "argv": argv}), _step("b")]}
-        rd = self._init({"pool_size": 1, "entries": [e]})
+        rd = self._init({"pool_size": 1, "jobs": [e]})
         T.tick(rd)
         self._complete(rd, "run-01", 0)
         out = T.tick(rd)
