@@ -105,7 +105,7 @@ class RunPickerScreen(_CopyMixin, Screen):
     BINDINGS = [Binding("r", "refresh", "Refresh"),
                 Binding("k", "kill", "Stop run"),
                 Binding("c", "copy", "Copy"),
-                Binding("q", "quit", "Quit")]
+                Binding("q", "app.quit", "Quit")]
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -172,7 +172,7 @@ class RunViewScreen(_CopyMixin, Screen):
         Binding("r", "refresh", "Refresh"),
         Binding("k", "kill", "Cancel entry"),
         Binding("c", "copy", "Copy"),
-        Binding("q", "quit", "Quit"),
+        Binding("q", "app.quit", "Quit"),
     ]
 
     def __init__(self, run_dir) -> None:
@@ -246,7 +246,7 @@ class EntryViewScreen(_CopyMixin, Screen):
         Binding("t", "tail", "Tail log"),
         Binding("r", "refresh", "Refresh"),
         Binding("c", "copy", "Copy"),
-        Binding("q", "quit", "Quit"),
+        Binding("q", "app.quit", "Quit"),
     ]
 
     def __init__(self, run_dir, entry_name) -> None:
@@ -293,7 +293,7 @@ class TailScreen(_CopyMixin, Screen):
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back"),
         Binding("c", "copy", "Copy"),
-        Binding("q", "quit", "Quit"),
+        Binding("q", "app.quit", "Quit"),
     ]
 
     def __init__(self, run_dir, entry_name) -> None:
