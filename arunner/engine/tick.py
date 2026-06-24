@@ -45,6 +45,7 @@ Stdlib only. Cross-platform (no process forking, no signals).
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import subprocess
@@ -1790,20 +1791,31 @@ def _newest_output_mtime(root: Path, globs=None, file_cap: int = _OUTAGE_FILE_CA
     seen so far is returned) and VCS metadata dirs are pruned -- never a full
     unbounded recursive walk per render. ``globs`` (if given) restricts the scan
     to matching paths. All OS errors are swallowed (a freshness probe must never
-    crash a render or a tick)."""
+    crash a render or a tick).
+
+    FR-73 portability (instr 007): the ``globs`` branch uses the stdlib ``glob``
+    module, NOT ``Path.glob``. ``glob.iglob(..., recursive=True)`` matches FILES
+    under a trailing ``**`` on Python 3.10+ (the supported floor) and is version-
+    stable; ``Path.glob('x/**')`` matched DIRECTORIES ONLY before 3.13, so the
+    documented ``["quality/**"]`` pattern found no files on 3.10-3.12 and a hung
+    worker with ``output_globs`` set was never reclaimed at ``stall_reclaim``.
+    ``iglob`` (not ``glob``) yields lazily, so the ``file_cap`` bound still caps
+    work without first materializing a full match list. Leading-dot VCS dirs
+    (``.git``/``.hg``/``.svn``) are not traversed by ``**`` (glob skips dotpaths
+    unless the pattern names the dot), matching the no-globs branch's pruning."""
     newest = None
     seen = 0
     try:
         if globs:
             for pat in globs:
-                for p in root.glob(pat):
-                    if not p.is_file():
+                for fp in glob.iglob(os.path.join(str(root), pat), recursive=True):
+                    if not os.path.isfile(fp):
                         continue
                     seen += 1
                     if seen > file_cap:
                         return newest
                     try:
-                        m = p.stat().st_mtime
+                        m = os.stat(fp).st_mtime
                     except OSError:
                         continue
                     if newest is None or m > newest:

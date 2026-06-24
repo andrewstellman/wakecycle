@@ -371,6 +371,10 @@ class OutAgeDataLayer(_Base):
         self.assertEqual(int(age), 10)
 
     def test_out_age_globs_scope_the_scan(self):
+        """FR-73: a trailing ``**`` must match files on the Python 3.10+ floor;
+        pre-3.13 ``Path.glob('x/**')`` matched directories only — verified bug
+        2026-06-24, instr 007. The impl uses ``glob.glob(..., recursive=True)``
+        (version-stable) so this scopes to quality/ and finds the file on 3.10+."""
         repo = self.repos / "g"
         repo.mkdir()
         _set_output(repo, M, rel="quality/fresh.txt")   # in scope
@@ -379,6 +383,31 @@ class OutAgeDataLayer(_Base):
         entry = {"output_globs": ["quality/**"]}
         age = T._output_age_secs(repo, "run-01", r, entry, {}, M + 10)
         self.assertEqual(int(age), 10)                  # scoped to quality/, not node_modules
+
+    def test_out_age_globs_non_doublestar_pattern(self):
+        """FR-73: the fix is not ``**``-specific — a plain ``*.txt`` glob (no
+        recursion) resolves to the correct newest mtime on the 3.10+ floor."""
+        repo = self.repos / "gn"
+        repo.mkdir()
+        _set_output(repo, M, rel="top.txt")             # in scope (top level)
+        _set_output(repo, M + 999, rel="nested/deep.txt")  # out of scope (not top level)
+        r = {"target_repo": str(repo)}
+        entry = {"output_globs": ["*.txt"]}
+        age = T._output_age_secs(repo, "run-01", r, entry, {}, M + 10)
+        self.assertEqual(int(age), 10)                  # only top.txt matched
+
+    def test_out_age_globs_multi_glob_list(self):
+        """FR-73: a multi-pattern ``output_globs`` list takes the newest mtime
+        across all patterns (union), portably on the 3.10+ floor."""
+        repo = self.repos / "gm"
+        repo.mkdir()
+        _set_output(repo, M - 100, rel="quality/old.txt")    # via quality/**
+        _set_output(repo, M, rel="reports/new.json")         # via reports/** (the newest in scope)
+        _set_output(repo, M + 999, rel="node_modules/x.txt")  # out of scope
+        r = {"target_repo": str(repo)}
+        entry = {"output_globs": ["quality/**", "reports/**"]}
+        age = T._output_age_secs(repo, "run-01", r, entry, {}, M + 10)
+        self.assertEqual(int(age), 10)                  # newest across both globs, not node_modules
 
     def test_outage_scan_is_bounded(self):
         # The scan is bounded: a zero file budget stats nothing and returns None,
