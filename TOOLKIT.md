@@ -147,6 +147,8 @@ A plan is one JSON file. Top-level knobs (all optional except `jobs`):
 | `pool_size` | 3 | Max concurrent in-flight jobs (claimed/running/stalled). |
 | `stall_threshold_minutes` | 45 | A job whose heartbeat is older than this is marked `stalled`. |
 | `launch_grace_minutes` | 10 | A claimed job that emits no heartbeat within this is marked `LAUNCH-FAIL`. |
+| `stall_reclaim_minutes` | 90 | FR-74: a job `stalled` past this **and** whose output is also stale (OUT-AGE) is reclaimed terminal `abandoned`, freeing its slot so the batch continues. Must be `> stall_threshold_minutes` and `< subagent_hard_cap_minutes`. A still-writing (output-fresh) job is never reclaimed. |
+| `output_globs` | — | FR-74/73: optional glob patterns (relative to a job's `repo`) scoping the OUT-AGE freshness scan to its real artifact area (e.g. `["quality/**"]`); plan-level or per-job. Omitted → the whole working tree (VCS dirs pruned, bounded). |
 | `idle_tick_multiplier` | 1 | Lengthens the cadence when nothing is actively running. |
 | `defaults` | — | Optional map shallow-merged **under** each job (a job's own key wins). |
 | `description` / `_comment` | — | Optional annotation (sanctioned at plan/job/step; never interpreted). |
@@ -235,6 +237,18 @@ also points the harness at a status file the job already maintains.
 > `subagent_hard_cap_minutes` (default 720 = 12h). Emitting the terminal beat on
 > return is what lets the engine reap the run `completed` instead of leaning on
 > the hard cap.
+
+> **Reading `HB-AGE` vs `OUT-AGE` (FR-73/FR-74).** The status table shows two
+> ages side by side: `HB-AGE` (time since the last heartbeat) and `OUT-AGE`
+> (time since the worker last WROTE a file under its output area). A
+> heartbeat-quiet worker is not necessarily hung — read the pair:
+> `HB-AGE 34m / OUT-AGE 40s` is **alive, just quiet** (still writing); only
+> `HB-AGE 34m / OUT-AGE 34m` is **really hung**. The engine uses the same signal:
+> at `stall_reclaim_minutes` it reclaims a stalled slot **only** when OUT-AGE is
+> also stale, so a still-writing worker is never abandoned and the batch
+> continues over a genuinely-hung one (a hung worker costs its own job, not the
+> whole run). Scope OUT-AGE to a job's real artifact area with `output_globs`
+> (e.g. `["quality/**"]`) so unrelated repo churn doesn't read as activity.
 
 ## The per-mode `command` contract (read this)
 

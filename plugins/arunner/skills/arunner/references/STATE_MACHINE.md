@@ -33,6 +33,7 @@ harness_runs/<stamp>/
 | `completed` | terminal heartbeat `COMPLETED` reaped | no | **yes** |
 | `failed` | terminal heartbeat `FAILED`/`ABANDONED` reaped | no | **yes** |
 | `auth_or_launch_failed` | claimed but no heartbeat within `launch_grace_minutes` | no | **yes** |
+| `abandoned` | reclaimed terminal — a stalled slot freed by FR-74 (or a CANCEL, FR-39) | no | **yes** |
 
 `done` is true exactly when every run is terminal.
 
@@ -47,7 +48,15 @@ queued ──[free pool slot]──▶ claimed ──[heartbeat STARTING/IN_PROG
    │                                                              completed | failed
    │
 running/claimed ──[heartbeat mtime > stall_threshold]──▶ stalled ──[fresh heartbeat]──▶ running
+                                                            │
+                          [hb-silent > stall_reclaim AND OUTPUT stale (OUT-AGE)] │ (FR-74)
+                                                            ▼
+                                                        abandoned  (terminal; slot freed → queue drains)
 ```
+
+The `stalled ↔ running` reversibility holds **below** the reclaim threshold; the
+`stalled → abandoned` edge is one-way (terminal). A stalled run whose OUTPUT is
+FRESH is held, never reclaimed (the alive-but-quiet guard).
 
 - **Dispatch (queued → claimed):** while the count of in-flight runs
   (claimed + running + stalled) is below `pool_size`, the lowest-numbered
@@ -67,6 +76,18 @@ running/claimed ──[heartbeat mtime > stall_threshold]──▶ stalled ─�
   the worker has genuinely gone quiet.
 - **Recover (stalled → running):** a fresh heartbeat (mtime back within
   threshold) returns a stalled run to running.
+- **Reclaim (stalled → abandoned, FR-74):** a run heartbeat-silent past
+  `stall_reclaim_minutes` (default 90 = 2× the stall threshold, ≫ stall and
+  ≪ the FR-72 720-min hard cap) **AND** whose newest OUTPUT write is older than
+  `stall_threshold_minutes` (the FR-73 OUT-AGE data signal) is reclaimed terminal
+  `abandoned` — it leaves the in-flight set, so a queued job dispatches and the
+  batch CONTINUEs (the gen-007 fix). **Guard:** a stalled-but-output-FRESH worker
+  (still writing files) is NEVER reclaimed; an unmeasurable output area is held,
+  not reclaimed (the hard cap remains the backstop). Reclaim is an accounting
+  free, not a kill (the engine is signals-free) — a reclaimed run's un-killed
+  worker emitting a late terminal does not resurrect it (terminal states are
+  skipped). `HALT:stalled` is reserved for the genuinely-unrecoverable wedge
+  (reclaim disabled, or every stalled slot output-fresh).
 - **Launch failure (claimed → auth_or_launch_failed):** a claimed run
   that emits NO heartbeat within `launch_grace_minutes` (default 10) is
   terminal-failed with a synthesized result record — the dispatch never

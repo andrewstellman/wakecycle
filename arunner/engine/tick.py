@@ -29,11 +29,13 @@ State machine (per run-NN; see references/STATE_MACHINE.md):
        └── (pool slot frees on any terminal) ◀───────────────────────────┘
                               running/claimed ── heartbeat mtime > stall_threshold ──▶ stalled
 
-`stalled` is NON-terminal and NON-killable in the MVP (no kill semantics —
-documented in STATE_MACHINE.md): the slot stays held, the run keeps being
-watched, and a late heartbeat can move it back to running. `done` is true
-only when every run is terminal (completed / failed / auth_or_launch_failed
-/ abandoned-in-results).
+`stalled` is NON-terminal and reversible BELOW the reclaim window: the slot
+stays held, the run keeps being watched, and a late heartbeat moves it back to
+running. FR-74 adds the reclaim edge: a run `stalled` past `stall_reclaim_minutes`
+AND whose OUTPUT is also stale (FR-73 OUT-AGE) goes terminal `abandoned`, freeing
+its slot so the queue drains (continue-past-stall). A stalled-but-output-FRESH
+run is never reclaimed (alive-but-quiet). `done` is true only when every run is
+terminal (completed / failed / auth_or_launch_failed / abandoned).
 
 Idempotency is mandatory: every transition checks "already done?" before
 mutating disk. Running the same tick twice in a row changes nothing but
@@ -66,6 +68,27 @@ DEFAULT_LAUNCH_GRACE_MINUTES = 10         # claimed + no heartbeat past this ⇒
 # false-reclaimed. (Re-derived from the fr-61-subagent-liveness reference onto the
 # post-format-collapse engine; the FR-40 wrap-adapter no-false-fail analogue.)
 DEFAULT_SUBAGENT_HARD_CAP_MINUTES = 720
+# FR-74: the MID-RUN stall reclaim window. A run that HEARTBEATED then went
+# quiet past `stall_threshold` is `stalled` (non-terminal, slot held). If it
+# stays heartbeat-silent past THIS larger window AND its OUTPUT is also stale
+# (FR-73 OUT-AGE), the engine reclaims its slot terminal (`abandoned`) so the
+# batch continues -- the gen-007 fix. Defaulted to 2x the stall threshold
+# (>> stall, << the 720-min hard cap): long enough that a genuinely-hung worker
+# is reclaimed before a pool-2 wedge HALTs the batch, but the output-fresh guard
+# (a stalled-but-still-writing worker is NEVER reclaimed) is what makes the time
+# threshold safe. Calibrated from the gen-007 incident: `defu` was output-silent
+# ~1h53m at HALT (genuinely hung -> reclaim), while `goshs`/`source-controller`
+# were heartbeat-quiet but still writing files (alive -> the guard holds them).
+DEFAULT_STALL_RECLAIM_MINUTES = 90
+# FR-74: requeue-before-abandon budget for a reclaimed stalled job. Default 0 =
+# the reclaim is a terminal ABANDON (free the slot for the QUEUE; do not re-run
+# the abandoned job's own work here). Requeue-as-resume of the abandoned job is
+# FR-75's per-job retry policy -- deliberately NOT done in FR-74 because (a) the
+# engine is signals-free/cross-platform (it cannot SIGKILL a stuck shell worker)
+# and (b) a subagent reclaim is an ACCOUNTING free, not a kill, so the un-killed
+# worker would race a re-dispatch on the same heartbeat file. The field is
+# accepted + validated now so FR-75 can consume it without a schema change.
+DEFAULT_STALL_RETRIES = 0
 DEFAULT_IDLE_TICK_MULTIPLIER = 1          # >1 lengthens cadence when nothing is running
 DEFAULT_KEEPALIVE_SECONDS = 45            # FR-58a: activity-refresh cadence (adapter keepalive)
 
@@ -140,6 +163,23 @@ _SUBAGENT_ADVISORY_DISPLAY = "NO-HEARTBEAT"
 # FR-21b: long internal state names must not overflow the status-table
 # column. Display-only abbreviation (the on-disk state is unchanged).
 _STATE_DISPLAY = {"auth_or_launch_failed": "LAUNCH-FAIL"}
+# FR-74: the synthesized-result summary for a stall-reclaimed run. `abandoned`
+# (terminal) is HONEST -- we gave up WAITING on a heartbeat-silent, output-stale
+# worker; we did not OBSERVE a failure. Reclaiming frees the pool slot so the
+# queue drains (continue-past-stall); the genuinely-hung worker costs its own
+# job, not the whole batch.
+_STALL_RECLAIM_HINT = ("stalled past the reclaim window with no output activity "
+                       "(OUT-AGE stale) -- slot reclaimed so the batch continues; "
+                       "abandoned (gave up waiting; no failure observed) (FR-74)")
+# FR-73: bound the OUT-AGE newest-mtime scan so a render NEVER does a full
+# unbounded recursive walk of a large working tree (e.g. node_modules). Once the
+# cap is hit the newest mtime seen so far is returned -- a slightly stale OUT-AGE
+# is acceptable for a DISPLAY signal, and the FR-74 guard only reclaims when
+# output is stale, so an under-count can never FALSE-reclaim a fresh worker.
+_OUTAGE_FILE_CAP = 4000
+# Version-control metadata is engine/tool churn, never worker OUTPUT -- pruned so
+# a `git gc` or index touch never reads as fresh worker activity.
+_OUTAGE_SKIP_DIRS = frozenset((".git", ".hg", ".svn"))
 
 # instr-051 (FR-62/FR-59 display-correctness): the persisted per-entry state in
 # harness_status.json is only as fresh as the LAST tick. When the orchestrator
@@ -1699,6 +1739,151 @@ def tick(run_dir: Path) -> dict:
     }
 
 
+# --- FR-73: OUT-AGE output-activity freshness (data layer) ------------------
+# The age of the newest write under a run's OUTPUT area -- a POSITIVE "this
+# worker is doing real work" signal that heartbeat silence cannot give. The
+# gen-007 forcing case: `source-controller`/`goshs` went heartbeat-quiet for
+# tens of minutes while still WRITING files; only output activity distinguished
+# them from a genuinely-hung `defu`. Pure stdlib (NFR-3), bounded (never an
+# unbounded recursive walk per render). TWO consumers, ONE data source:
+#   * DISPLAY  -- the OUT-AGE column in _format_table (and so monitor + tui).
+#   * FR-74    -- the reclaim guard reads THIS function's mtime signal DIRECTLY
+#                 (a data read), NEVER the rendered column, so OUT-AGE stays a
+#                 display-only column while the lifecycle reads a data signal --
+#                 the display-only invariant is literally true (pinned by a test).
+# It is NEVER read by _terminal_status_of / doneness: a run is done iff its
+# DECLARED terminal status says so (FR-18), never because its files look fresh.
+
+def _output_root(r, entry):
+    """The directory whose write-activity is a run's OUTPUT freshness signal:
+    the run's ``target_repo`` working tree (set at dispatch), else the entry's
+    declared ``repo``. None when neither resolves (an unmeasurable run -- the
+    FR-74 guard then HOLDS, never reclaims, on the absence of a signal)."""
+    repo = (r or {}).get("target_repo")
+    if not repo and isinstance(entry, dict):
+        repo = entry.get("repo")
+    if not repo:
+        return None
+    p = Path(repo)
+    return p if p.exists() else None
+
+
+def _output_globs(entry, plan):
+    """The optional ``output_globs`` (entry wins over plan) -- a list of glob
+    patterns (relative to the output root) that NARROW the freshness scan to a
+    job's real artifact area (e.g. ``["quality/**"]``), so unrelated repo churn
+    never reads as worker activity. A non-list / empty value -> None (scan the
+    whole tree, VCS dirs pruned). Non-string members are dropped (Postel)."""
+    for src in (entry if isinstance(entry, dict) else None, plan or {}):
+        if isinstance(src, dict):
+            g = src.get("output_globs")
+            if isinstance(g, list):
+                pats = [s for s in g if isinstance(s, str) and s]
+                if pats:
+                    return pats
+    return None
+
+
+def _newest_output_mtime(root: Path, globs=None, file_cap: int = _OUTAGE_FILE_CAP):
+    """The newest file mtime (epoch float) under ``root``, or None when the area
+    has no files. BOUNDED: at most ``file_cap`` files are stat'd (then the newest
+    seen so far is returned) and VCS metadata dirs are pruned -- never a full
+    unbounded recursive walk per render. ``globs`` (if given) restricts the scan
+    to matching paths. All OS errors are swallowed (a freshness probe must never
+    crash a render or a tick)."""
+    newest = None
+    seen = 0
+    try:
+        if globs:
+            for pat in globs:
+                for p in root.glob(pat):
+                    if not p.is_file():
+                        continue
+                    seen += 1
+                    if seen > file_cap:
+                        return newest
+                    try:
+                        m = p.stat().st_mtime
+                    except OSError:
+                        continue
+                    if newest is None or m > newest:
+                        newest = m
+        else:
+            for dirpath, dirnames, filenames in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in _OUTAGE_SKIP_DIRS]
+                for fn in filenames:
+                    seen += 1
+                    if seen > file_cap:
+                        return newest
+                    try:
+                        m = os.stat(os.path.join(dirpath, fn)).st_mtime
+                    except OSError:
+                        continue
+                    if newest is None or m > newest:
+                        newest = m
+    except OSError:
+        return newest
+    return newest
+
+
+def _output_age_secs(run_dir, name, r, entry, plan, now, memo=None):
+    """FR-73: seconds since the newest write under this run's OUTPUT area, or
+    None when unmeasurable (no resolvable area / no files). ``memo`` (a dict)
+    de-dupes the bounded scan WITHIN one render so two runs sharing an output
+    root (or the same run consulted by display + the FR-74 guard) scan once."""
+    root = _output_root(r, entry)
+    if root is None:
+        return None
+    globs = _output_globs(entry, plan)
+    key = (str(root), tuple(globs) if globs else None)
+    if memo is not None and key in memo:
+        newest = memo[key]
+    else:
+        newest = _newest_output_mtime(root, globs)
+        if memo is not None:
+            memo[key] = newest
+    if newest is None:
+        return None
+    return max(0.0, now - newest)
+
+
+def _out_age_str(out_age) -> str:
+    """Render an OUT-AGE seconds value as the table cell (``-`` when None)."""
+    if out_age is None:
+        return "-"
+    a = int(out_age)
+    return "%dm%02ds" % (a // 60, a % 60)
+
+
+# --- FR-74: reclaim a genuinely-hung stalled slot so the batch continues -----
+
+def _reclaim_stalled(run_dir, name, r, reason=_STALL_RECLAIM_HINT):
+    """FR-74: take a stalled, heartbeat-silent, OUTPUT-STALE run terminal so its
+    pool slot frees and the queue can dispatch (the continue-past-stall
+    guarantee). Uses the SAME idempotent synthesis path CANCEL uses
+    (``_synthesize_failure`` -> ``abandoned``), so:
+
+      * the slot frees immediately (`abandoned` leaves _INFLIGHT_STATES);
+      * it is IDEMPOTENT and COMEBACK-SAFE -- a subagent reclaim is an accounting
+        free, not a kill (the engine has no kill semantics; it is signals-free),
+        so the un-killed worker may keep running and later emit a terminal line.
+        Because the run is already terminal, _advance skips it forever (terminal
+        guard), _dispatch only ever dispatches `queued`, and the display
+        reconciler only overlays a heartbeat terminal onto an _INFLIGHT_ state --
+        so a late COMPLETED/FAILED can NOT resurrect, double-count, or
+        double-dispatch the run. Actual concurrency may briefly exceed pool_size
+        in subagent mode by design (documented; FR-74 is cleanest in shell mode).
+
+    The output-fresh guard is the CALLER's responsibility (it already proved the
+    output is stale); this only performs the reclaim."""
+    _synthesize_failure(run_dir, r, "abandoned", reason)
+    r["state"] = "abandoned"            # leaves _INFLIGHT_STATES -> frees a slot
+    r.pop("launch_advisory", None)
+    _log(run_dir, "%s: STALLED->ABANDONED (FR-74 reclaim: heartbeat-silent past "
+                  "reclaim window AND output stale -- slot freed, batch continues)"
+         % name)
+
+
 def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
              entries=None, plan=None):
     """Reap terminals, detect stalls and launch failures. Mutates run
@@ -1811,6 +1996,23 @@ def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
                 # a genuine stall isn't masked. The next tick re-evaluates.
                 pass
             elif (now - mtime) > stall_secs and not suppress_stall:
+                # FR-74: a stalled run heartbeat-silent PAST the reclaim window
+                # AND whose OUTPUT is ALSO stale is genuinely hung -> reclaim its
+                # slot (abandon) so the queue drains. The output-fresh guard is
+                # load-bearing: a heartbeat-quiet worker still WRITING files is
+                # alive and is NEVER reclaimed (the gen-007 goshs/source-controller
+                # false-stall). Output is "stale" past the SAME `stall_secs`
+                # horizon the engine already uses for "gone quiet"; an
+                # UNMEASURABLE output area (None) is conservatively treated as
+                # FRESH -> hold (never reclaim on the mere absence of a signal;
+                # the FR-72 hard cap remains the backstop for that degenerate case).
+                reclaim_secs = _cfg(plan, "stall_reclaim_minutes",
+                                    DEFAULT_STALL_RECLAIM_MINUTES) * 60
+                out_age = _output_age_secs(run_dir, name, r, entry, plan, now)
+                out_stale = out_age is not None and out_age > stall_secs
+                if (now - mtime) > reclaim_secs and out_stale:
+                    _reclaim_stalled(run_dir, name, r)
+                    continue
                 if r["state"] != "stalled":
                     r["state"] = "stalled"
                     _log(run_dir, f"{name}: STALLED (heartbeat age "
@@ -2333,6 +2535,25 @@ def _advance_multistep(run_dir, name, r, entry, now, stall_secs, grace_secs,
         if mtime is None:
             pass
         elif (now - mtime) > stall_secs and not suppress_stall:
+            # FR-74: same mid-run reclaim as the single-prompt path -- a stalled
+            # step heartbeat-silent past the reclaim window AND output-stale
+            # reclaims the whole run (abandon) so its slot frees and the batch
+            # continues; a still-writing (output-fresh) step is held, never
+            # abandoned. The reclaim writes the entry-level result so the
+            # multi-step roll-up stays consistent, then takes the run terminal.
+            reclaim_secs = _cfg(plan, "stall_reclaim_minutes",
+                                DEFAULT_STALL_RECLAIM_MINUTES) * 60
+            out_age = _output_age_secs(run_dir, name, r, entry, plan, now)
+            out_stale = out_age is not None and out_age > stall_secs
+            if (now - mtime) > reclaim_secs and out_stale:
+                _reap_step_synth(run_dir, name, m, "ABANDONED", _STALL_RECLAIM_HINT)
+                _write_entry_result(run_dir, name, r, "ABANDONED",
+                                    "%s %s" % (_step_name(m), _STALL_RECLAIM_HINT))
+                r["state"] = "abandoned"      # leaves _INFLIGHT_STATES -> frees a slot
+                r.pop("launch_advisory", None)
+                _log(run_dir, "%s: STALLED->ABANDONED at %s (FR-74 reclaim: "
+                     "output stale, slot freed)" % (name, _step_name(m)))
+                return
             if r["state"] != "stalled":
                 r["state"] = "stalled"
                 _log(run_dir, "%s/%s: STALLED" % (name, _step_name(m)))
@@ -2696,19 +2917,22 @@ def _ascii_trunc(value, width: int) -> str:
 
 
 def _format_table(run_dir, status, plan, terminal: bool) -> str:
-    bar = "-" * 86
+    bar = "-" * 95
     # FR-21b: STATE narrowed + abbreviated (LAUNCH-FAIL) so it can't
     # overflow; ACTIVITY (the free-form label) widened and sanitized.
-    fmt = "%-5s%-22s%-8s%-13s%-16s%-13s%-9s%s"
+    # FR-73: OUT-AGE inserted between HB-AGE and TOKENS (one renderer -> the
+    # column appears in the engine table, `monitor`, and `tui` alike, FR-71).
+    fmt = "%-5s%-22s%-8s%-13s%-16s%-13s%-9s%-9s%s"
     rows = [
         "Run-Dir: %s (cycle %d)" % (run_dir.name, status.get("cycle", 0)),
         bar,
         fmt % ("RUN", "REPO", "MODE", "STATE", "ACTIVITY", "LAST-HB",
-               "HB-AGE", "TOKENS"),
+               "HB-AGE", "OUT-AGE", "TOKENS"),
     ]
     any_launch_fail = False
     any_live = False
     any_advisory = False
+    outage_memo = {}                     # FR-73: de-dupe the bounded scan per render
     now = _now()
     # instr-051: reconcile the persisted STATE against the live heartbeat so a
     # finished/started worker isn't shown stale between ticks. The freshness
@@ -2717,6 +2941,11 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
     # display agrees with the engine's own liveness model.
     fresh_secs = _cfg(plan, "stall_threshold_minutes",
                       DEFAULT_STALL_THRESHOLD_MINUTES) * 60
+    # FR-73: the entry map (for OUT-AGE's optional output_globs / repo fallback),
+    # rebuilt the same way tick() does so the column renders identically off-tick
+    # (monitor / tui / status all call _format_table with no live entries arg).
+    outage_entries = {"run-%02d" % i: e
+                      for i, e in enumerate(_merge_defaults(plan), start=1)}
     for name in sorted(status["runs"]):
         r = status["runs"][name]
         hb = _run_hb_path(run_dir, name, r)          # FR-62: current step's hb (multi-step aware)
@@ -2747,6 +2976,9 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
         # else the last-tick-persisted observation.
         last_hb = hb_status or r.get("last_hb_status") or "-"
         inp, outp = _run_tokens(run_dir, name, r)        # FR-65 TOKENS column
+        out_age = _output_age_secs(run_dir, name, r,     # FR-73 OUT-AGE column
+                                   outage_entries.get(name), plan, now,
+                                   memo=outage_memo)
         rows.append(fmt % (
             name[4:],
             _ascii_trunc(r.get("target_repo") or "-", 21),
@@ -2756,6 +2988,7 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
             _ascii_trunc(activity, 15),
             last_hb,
             _hb_age_str(run_dir, name, hb),
+            _out_age_str(out_age),
             _tokens_cell(inp, outp),
         ))
     c = status["counts"]
@@ -2881,7 +3114,8 @@ def _arunner_version() -> str:
 # Strict-keys (additionalProperties:false) allowed-key sets, per mode. The
 # --check validator rejects any unknown job/step key (a typo like `promt`/`repoo`
 # fails here, not silently at dispatch), in lockstep with plan.schema.json.
-_COMMON_JOB_KEYS = frozenset(("id", "repo", "mode", "description", "_comment"))
+_COMMON_JOB_KEYS = frozenset(("id", "repo", "mode", "description", "_comment",
+                              "output_globs"))   # FR-73 per-job artifact-area scope
 _ADAPTER_OPT_KEYS = frozenset(("adapter_activity_patterns", "keepalive_seconds",
                                "launch_grace_minutes", "stall_threshold_minutes"))
 _MODE_JOB_KEYS = {
@@ -2905,11 +3139,15 @@ _MODE_STEP_KEYS = {
 # plan.schema.json minimums; defaults live in the engine if omitted).
 _PLAN_INT_KEYS = ("tick_interval_minutes", "pool_size", "stall_threshold_minutes",
                   "launch_grace_minutes", "idle_tick_multiplier",
-                  "subagent_hard_cap_minutes")   # FR-72 (>> launch grace; default 720)
+                  "subagent_hard_cap_minutes",   # FR-72 (>> launch grace; default 720)
+                  "stall_reclaim_minutes")       # FR-74 (> stall, << hard cap; default 90)
 # The closed set of plan-root keys (additionalProperties:false, == plan.schema.json).
+# FR-73 output_globs (optional artifact-area scope) + FR-74 stall_retries
+# (validated >= 0 separately, since _PLAN_INT_KEYS requires >= 1).
 _PLAN_KEYS = frozenset(_PLAN_INT_KEYS + (
     "schema_version", "description", "_comment", "keepalive_seconds", "vars",
-    "defaults", "allow_reasoning_gates", "measurement", "jobs"))
+    "defaults", "allow_reasoning_gates", "measurement", "jobs",
+    "output_globs", "stall_retries"))
 # Reuse the engine's substitution sets so the check can NEVER drift from what
 # _dispatch actually substitutes (FR-42). _KNOWN_PLACEHOLDERS catches typos like
 # {HEARTBEATPATH}; the subagent prompt must carry the full _PLACEHOLDERS block.
@@ -3415,7 +3653,50 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
                 "%d -- the hard cap reclaims a hung subagent only AFTER the "
                 "NO-HEARTBEAT advisory window (FR-72)"
                 % (plan["subagent_hard_cap_minutes"], plan_grace))
+    # FR-74: stall_reclaim_minutes must sit ABOVE the stall threshold (a run can
+    # only be reclaimed AFTER it is stalled) and BELOW the subagent hard cap
+    # (else the FR-72 cap would reclaim a never-heartbeated slot first and the
+    # mid-run reclaim could never fire) -- the ordering stall < reclaim < cap.
+    if "stall_reclaim_minutes" in plan and _is_pos_int(plan["stall_reclaim_minutes"]):
+        reclaim = plan["stall_reclaim_minutes"]
+        plan_stall = plan.get("stall_threshold_minutes", DEFAULT_STALL_THRESHOLD_MINUTES)
+        plan_cap = plan.get("subagent_hard_cap_minutes", DEFAULT_SUBAGENT_HARD_CAP_MINUTES)
+        if isinstance(plan_stall, int) and reclaim <= plan_stall:
+            problems.append(
+                "plan.stall_reclaim_minutes: %d must be > stall_threshold_minutes "
+                "%d -- a stalled run is reclaimed only AFTER the stall window "
+                "(FR-74)" % (reclaim, plan_stall))
+        if isinstance(plan_cap, int) and reclaim >= plan_cap:
+            problems.append(
+                "plan.stall_reclaim_minutes: %d must be < subagent_hard_cap_minutes "
+                "%d -- the mid-run reclaim must fire BEFORE the launch hard cap "
+                "(FR-74/FR-72)" % (reclaim, plan_cap))
+    # FR-74: stall_retries is a NON-NEGATIVE int (0 = abandon-on-reclaim, the
+    # default; >0 is reserved for the FR-75 retry policy). Validated here because
+    # _PLAN_INT_KEYS requires >= 1 and 0 is the meaningful default.
+    if "stall_retries" in plan and not (
+            isinstance(plan["stall_retries"], int)
+            and not isinstance(plan["stall_retries"], bool)
+            and plan["stall_retries"] >= 0):
+        problems.append("plan.stall_retries: must be an integer >= 0 (got %r)"
+                        % (plan["stall_retries"],))
+    # FR-73: output_globs (plan-level or per-job) is a list of non-empty strings.
+    problems.extend(_check_output_globs("plan", plan.get("output_globs"))
+                    if "output_globs" in plan else [])
+    for i, e in enumerate(jobs):
+        if isinstance(e, dict) and "output_globs" in e:
+            problems.extend(_check_output_globs("jobs[%d]" % i, e["output_globs"]))
     return problems
+
+
+def _check_output_globs(tag, g) -> list:
+    """FR-73: an ``output_globs`` value must be a list of non-empty strings."""
+    if not isinstance(g, list):
+        return ["%s.output_globs: must be an array of glob strings (got %r)"
+                % (tag, g)]
+    if not all(isinstance(s, str) and s for s in g):
+        return ["%s.output_globs: every entry must be a non-empty string" % tag]
+    return []
 
 
 def _format_check_report(plan_path, problems) -> str:

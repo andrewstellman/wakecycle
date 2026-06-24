@@ -33,6 +33,19 @@
       "type": "integer", "minimum": 1, "default": 720,
       "description": "FR-72 (optional, default 720 = 12h, should be >> launch_grace_minutes): the subagent-mode reclaim cap. In mode:agent the engine does NOT own the worker (the orchestrator's Task does), so no-heartbeat-past-launch-grace is ADVISORY (NO-HEARTBEAT), never terminal; only a subagent silent past THIS much longer cap is reclaimed auth_or_launch_failed so a genuinely-hung slot can't be pinned forever."
     },
+    "stall_reclaim_minutes": {
+      "type": "integer", "minimum": 1, "default": 90,
+      "description": "FR-74 (optional, default 90 = 2x the stall threshold; must be > stall_threshold_minutes and < subagent_hard_cap_minutes): the MID-RUN reclaim window. A run heartbeat-silent past this AND whose OUTPUT is also stale (FR-73 OUT-AGE older than stall_threshold_minutes) is reclaimed terminal `abandoned` so its pool slot frees and the queue drains (continue-past-stall). A stalled-but-output-FRESH run is NEVER reclaimed (the quiet-but-working guard). This is the fast mid-run path; subagent_hard_cap_minutes is the slow launch backstop."
+    },
+    "stall_retries": {
+      "type": "integer", "minimum": 0, "default": 0,
+      "description": "FR-74 (optional, default 0 = a reclaimed stalled job is abandoned, freeing its slot for the QUEUE; the abandoned job's own work is NOT re-run here). Reserved for the FR-75 per-job retry policy (requeue-as-resume): the engine accepts and validates it now so FR-75 needs no schema change. FR-74 itself always abandons (the engine is signals-free and cannot kill a stuck worker; a subagent reclaim is an accounting free, not a kill)."
+    },
+    "output_globs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "description": "FR-73 (optional): glob patterns (relative to a job's repo/target_repo) that NARROW the OUT-AGE freshness scan to the real artifact area (e.g. [\"quality/**\"]), so unrelated repo churn never reads as worker activity. Omitted -> the whole working tree is scanned (VCS dirs pruned, bounded). A per-job output_globs overrides this plan-level value."
+    },
     "idle_tick_multiplier": {
       "type": "integer", "minimum": 1, "default": 1,
       "description": "Lengthens the tick cadence by this factor when nothing is actively running (all waiting/stalled). 1 = uniform cadence."
@@ -193,21 +206,22 @@
         "keepalive_seconds": { "type": "integer", "minimum": 1, "description": "command/log mode (optional, FR-58a): per-job activity-refresh cadence override; must land within launch grace." },
         "launch_grace_minutes": { "type": "integer", "minimum": 1, "description": "Optional per-job override of the plan launch grace (command/log adapter synthesis)." },
         "stall_threshold_minutes": { "type": "integer", "minimum": 1, "description": "Optional per-job override of the plan stall threshold (command/log adapter synthesis)." },
-        "vars": { "type": "object", "additionalProperties": { "type": ["string", "number"] }, "description": "FR-61 (optional): a flat operator-declared map substituted into the prompt/argv by the {key} replace-key pass, run BEFORE the engine's reserved placeholders. A value may not contain a reserved engine token and a reserved placeholder name is not a valid key (both --check errors)." }
+        "vars": { "type": "object", "additionalProperties": { "type": ["string", "number"] }, "description": "FR-61 (optional): a flat operator-declared map substituted into the prompt/argv by the {key} replace-key pass, run BEFORE the engine's reserved placeholders. A value may not contain a reserved engine token and a reserved placeholder name is not a valid key (both --check errors)." },
+        "output_globs": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "FR-73 (optional): per-job override of the plan output_globs — glob patterns (relative to this job's repo) scoping the OUT-AGE freshness scan to its real artifact area (e.g. [\"quality/**\"]). Omitted -> whole working tree (VCS dirs pruned, bounded)." }
       },
       "comment": "Each branch is CLOSED to its mode's allowed keys (additionalProperties:false on common + mode-specific) so the schema rejects a cross-mode key (e.g. success_regex on an agent job) exactly as tick.py check_plan's per-mode key sets do — one source of truth.",
       "oneOf": [
         { "title": "agent job", "additionalProperties": false,
-          "properties": { "id": {}, "repo": {}, "mode": { "const": "agent" }, "description": {}, "_comment": {}, "vars": {}, "heartbeat_path": {}, "prompt": {}, "prompt_file": {} },
+          "properties": { "id": {}, "repo": {}, "mode": { "const": "agent" }, "description": {}, "_comment": {}, "vars": {}, "output_globs": {}, "heartbeat_path": {}, "prompt": {}, "prompt_file": {} },
           "oneOf": [ { "required": ["prompt"] }, { "required": ["prompt_file"] } ] },
         { "title": "command job", "additionalProperties": false, "required": ["command"],
-          "properties": { "id": {}, "repo": {}, "mode": { "const": "command" }, "description": {}, "_comment": {}, "vars": {}, "heartbeat_path": {}, "command": {}, "auth_check": {}, "adapter_activity_patterns": {}, "keepalive_seconds": {}, "launch_grace_minutes": {}, "stall_threshold_minutes": {} } },
+          "properties": { "id": {}, "repo": {}, "mode": { "const": "command" }, "description": {}, "_comment": {}, "vars": {}, "output_globs": {}, "heartbeat_path": {}, "command": {}, "auth_check": {}, "adapter_activity_patterns": {}, "keepalive_seconds": {}, "launch_grace_minutes": {}, "stall_threshold_minutes": {} } },
         { "title": "log job", "additionalProperties": false, "required": ["log_path"],
-          "properties": { "id": {}, "repo": {}, "mode": { "const": "log" }, "description": {}, "_comment": {}, "vars": {}, "heartbeat_path": {}, "log_path": {}, "command": {}, "success_regex": {}, "failure_regex": {}, "sentinel_file": {}, "pid": {}, "adapter_activity_patterns": {}, "keepalive_seconds": {}, "launch_grace_minutes": {}, "stall_threshold_minutes": {} } },
+          "properties": { "id": {}, "repo": {}, "mode": { "const": "log" }, "description": {}, "_comment": {}, "vars": {}, "output_globs": {}, "heartbeat_path": {}, "log_path": {}, "command": {}, "success_regex": {}, "failure_regex": {}, "sentinel_file": {}, "pid": {}, "adapter_activity_patterns": {}, "keepalive_seconds": {}, "launch_grace_minutes": {}, "stall_threshold_minutes": {} } },
         { "title": "pipeline job", "additionalProperties": false, "required": ["steps"],
-          "properties": { "id": {}, "repo": {}, "mode": { "const": "pipeline" }, "description": {}, "_comment": {}, "vars": {}, "steps": {} } },
+          "properties": { "id": {}, "repo": {}, "mode": { "const": "pipeline" }, "description": {}, "_comment": {}, "vars": {}, "output_globs": {}, "steps": {} } },
         { "title": "shell job", "additionalProperties": false, "required": ["command"],
-          "properties": { "id": {}, "repo": {}, "mode": { "const": "shell" }, "description": {}, "_comment": {}, "vars": {}, "heartbeat_path": {}, "command": {}, "auth_check": {} } }
+          "properties": { "id": {}, "repo": {}, "mode": { "const": "shell" }, "description": {}, "_comment": {}, "vars": {}, "output_globs": {}, "heartbeat_path": {}, "command": {}, "auth_check": {} } }
       ]
     }
   }
