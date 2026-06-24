@@ -27,7 +27,11 @@
     },
     "launch_grace_minutes": {
       "type": "integer", "minimum": 1, "default": 10,
-      "description": "A claimed run that emits NO heartbeat within this window is marked auth_or_launch_failed (the dispatch never started a worker)."
+      "description": "A claimed run that emits NO heartbeat within this window is marked auth_or_launch_failed -- but ONLY for shell-dispatch modes (command/log/shell), where the engine owns the Popen. For mode:agent (subagent) this window only raises a NON-terminal NO-HEARTBEAT advisory (FR-72), never a launch failure."
+    },
+    "subagent_hard_cap_minutes": {
+      "type": "integer", "minimum": 1, "default": 720,
+      "description": "FR-72 (optional, default 720 = 12h, should be >> launch_grace_minutes): the subagent-mode reclaim cap. In mode:agent the engine does NOT own the worker (the orchestrator's Task does), so no-heartbeat-past-launch-grace is ADVISORY (NO-HEARTBEAT), never terminal; only a subagent silent past THIS much longer cap is reclaimed auth_or_launch_failed so a genuinely-hung slot can't be pinned forever."
     },
     "idle_tick_multiplier": {
       "type": "integer", "minimum": 1, "default": 1,

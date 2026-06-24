@@ -56,7 +56,16 @@ from pathlib import Path
 DEFAULT_POOL_SIZE = 3
 DEFAULT_TICK_INTERVAL_MINUTES = 10
 DEFAULT_STALL_THRESHOLD_MINUTES = 45      # design §Open questions #5 / Risks
-DEFAULT_LAUNCH_GRACE_MINUTES = 10         # claimed + no heartbeat past this ⇒ launch failed
+DEFAULT_LAUNCH_GRACE_MINUTES = 10         # claimed + no heartbeat past this ⇒ launch failed (shell mode)
+# FR-72: the SUBAGENT-mode reclaim cap. In subagent mode (mode:agent) the engine
+# does NOT own the worker (the orchestrator's Task does) and has no authority to
+# observe its liveness, so no-heartbeat-past-launch_grace is ADVISORY
+# (NO-HEARTBEAT), never terminal -- only a genuinely-hung slot, silent past this
+# MUCH longer cap (>> launch_grace), is reclaimed terminal so a hang can't pin a
+# slot forever. Defaulted generously (12h) so a slow-but-alive subagent is never
+# false-reclaimed. (Re-derived from the fr-61-subagent-liveness reference onto the
+# post-format-collapse engine; the FR-40 wrap-adapter no-false-fail analogue.)
+DEFAULT_SUBAGENT_HARD_CAP_MINUTES = 720
 DEFAULT_IDLE_TICK_MULTIPLIER = 1          # >1 lengthens cadence when nothing is running
 DEFAULT_KEEPALIVE_SECONDS = 45            # FR-58a: activity-refresh cadence (adapter keepalive)
 
@@ -115,6 +124,19 @@ _INFLIGHT_STATES = ("claimed", "running", "stalled")
 # footnote carry this actionable hint, not a bare "auth failed".
 _LAUNCH_FAIL_HINT = ("no heartbeat received within launch grace - check "
                      "worker-side launch: auth, helper availability, paths")
+# FR-72: subagent-mode advisory + hard-cap hints. The advisory is NON-terminal
+# (the engine lacks process authority over a subagent); the hard cap is the only
+# engine-side terminal reclaim for a subagent, mirroring the narrow set of places
+# auth_or_launch_failed stays reachable (shell spawn/auth, FR-42 pre-flight).
+_SUBAGENT_ADVISORY_HINT = ("no heartbeat yet from a subagent worker -- the engine "
+                           "does not own this process (the orchestrator does), so "
+                           "this is ADVISORY (NO-HEARTBEAT), not a launch failure (FR-72)")
+_SUBAGENT_HARD_CAP_HINT = ("no heartbeat from a subagent worker within the hard cap "
+                           "-- reclaiming the slot so a genuinely-hung subagent cannot "
+                           "pin it forever (FR-72 subagent hard cap)")
+# FR-72: the display state shown for a claimed subagent past launch grace but
+# still within the hard cap (on-disk lifecycle state stays `claimed`).
+_SUBAGENT_ADVISORY_DISPLAY = "NO-HEARTBEAT"
 # FR-21b: long internal state names must not overflow the status-table
 # column. Display-only abbreviation (the on-disk state is unchanged).
 _STATE_DISPLAY = {"auth_or_launch_failed": "LAUNCH-FAIL"}
@@ -279,6 +301,26 @@ def _dispatch_mode_of(entry) -> str:
     its friendly ``mode``. Recorded in the manifest/lock/record (A2A vocabulary)."""
     return "shell" if (isinstance(entry, dict)
                        and entry.get("mode") in _SHELL_MODES) else "subagent"
+
+
+def _record_dispatch_mode_of(run_dir: Path, run_name: str, r: dict) -> str:
+    """FR-72: the dispatch mode (``subagent`` | ``shell``) of a RUN record, for the
+    liveness fork in ``_advance``. Prefer the runs-record field the engine set at
+    dispatch; fall back to the per-run manifest (set at scaffold). An unknown/
+    missing mode defaults to ``subagent`` -- the CONSERVATIVE choice: never
+    autonomously terminal-fail a worker the engine can't confirm it owns (the
+    engine only owns shell/Popen workers)."""
+    m = r.get("dispatch_mode")
+    if m in ("subagent", "shell"):
+        return m
+    mf = run_dir / run_name / "manifest.json"
+    if mf.is_file():
+        try:
+            m = json.loads(mf.read_text(encoding="utf-8", errors="replace")
+                           ).get("dispatch_mode")
+        except (OSError, ValueError):
+            m = None
+    return m if m in ("subagent", "shell") else "subagent"
 
 
 def _apply_defaults(job: dict, defaults: dict) -> dict:
@@ -1683,6 +1725,9 @@ def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
         has_any, last_status, _activity, mtime = _hb_observe(hb)
         if has_any:
             r["last_hb_status"] = last_status
+            # FR-72: any heartbeat clears a prior NO-HEARTBEAT advisory -- the
+            # worker is demonstrably alive, so the advisory is stale.
+            r.pop("launch_advisory", None)
         # Postel: a malformed (non-JSON) heartbeat line is SKIPPED by the
         # reader, never fatal — but surface it as a non-fatal warning so an
         # operator can see a worker is writing garbage (FR-19).
@@ -1711,7 +1756,15 @@ def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
             r["state"] = "failed"
             _log(run_dir, f"{name}: FAILED (dead shell PID {pid}, no terminal)")
             continue
-        # 2. claimed + no heartbeat past launch grace ⇒ launch failed
+        # 2. claimed + no heartbeat. The transition FORKS by who OWNS the worker
+        #    (FR-72). SHELL mode (command/log/shell): the ticker Popen'd it, so the
+        #    engine has process authority -- no heartbeat past launch grace is a
+        #    legitimate launch failure (unchanged). SUBAGENT mode (mode:agent): the
+        #    engine does NOT own the worker (the orchestrator's Task does) and
+        #    cannot observe its liveness, so missing-heartbeat-past-grace is
+        #    ADVISORY (NO-HEARTBEAT), never terminal -- extending FR-40's "a long
+        #    quiet worker never false-trips LAUNCH-FAIL" invariant to subagent
+        #    mode. Only the long hard cap (>> grace) reclaims a genuinely-hung slot.
         if state == "claimed" and not has_any:
             claimed_at = r.get("claimed_at")
             if claimed_at is None:
@@ -1719,7 +1772,30 @@ def _advance(run_dir, runs, now, stall_secs, grace_secs, suppress_stall=False,
                 # partial-advance anomaly, panelist A-F4): start the grace
                 # clock now instead of being permanently immune to it.
                 r["claimed_at"] = now
-            elif (now - claimed_at) > grace_secs:
+                continue
+            age = now - claimed_at
+            if _record_dispatch_mode_of(run_dir, name, r) == "subagent":
+                hard_cap_secs = _cfg(plan, "subagent_hard_cap_minutes",
+                                     DEFAULT_SUBAGENT_HARD_CAP_MINUTES) * 60
+                if age > hard_cap_secs:
+                    # The slot-pin backstop: a genuinely-dead silent subagent is
+                    # reclaimed terminal only here, never at launch grace.
+                    _synthesize_failure(run_dir, r, "auth_or_launch_failed",
+                                        _SUBAGENT_HARD_CAP_HINT)
+                    r["state"] = "auth_or_launch_failed"
+                    r.pop("launch_advisory", None)
+                    _log(run_dir, f"{name}: AUTH_OR_LAUNCH_FAILED (subagent hard "
+                                  f"cap {int(hard_cap_secs)}s exceeded, no heartbeat)")
+                elif age > grace_secs and r.get("launch_advisory") != _SUBAGENT_ADVISORY_DISPLAY:
+                    # Advisory only: surface NO-HEARTBEAT, stay `claimed`
+                    # (non-terminal, slot held -- the worker may be alive).
+                    r["launch_advisory"] = _SUBAGENT_ADVISORY_DISPLAY
+                    _log(run_dir, f"{name}: NO-HEARTBEAT advisory (subagent past "
+                                  f"launch grace; NOT terminal -- engine lacks "
+                                  f"process authority, FR-72)")
+                continue
+            # shell mode: engine owns the process -> grace is terminal.
+            if age > grace_secs:
                 _synthesize_failure(run_dir, r,
                                     "auth_or_launch_failed",
                                     _LAUNCH_FAIL_HINT)
@@ -1930,6 +2006,7 @@ def _advance_judge(run_dir, name, r, entry, now, stall_secs, grace_secs,
     has_any, last_status, _a, mtime = _hb_observe(hb)
     if has_any:
         r["last_hb_status"] = last_status
+        r.pop("launch_advisory", None)        # FR-72: any beat clears the advisory
     terminal = _terminal_status_of(hb)
 
     def _finish(outcome, judge):
@@ -1952,10 +2029,24 @@ def _advance_judge(run_dir, name, r, entry, now, stall_secs, grace_secs,
         _finish("internal_error", {"verdict_source": "data.verdict"})
         return
     if r["state"] == "claimed" and not has_any:
+        # FR-72: the reasoning-gate judge is itself a SUBAGENT the engine can't
+        # observe -- never fail it at launch grace just for silence. Past grace it
+        # is a NON-terminal NO-HEARTBEAT advisory; only past the long hard cap is
+        # it failed-closed to internal_error (FR-63), so a slow-but-alive judge is
+        # not false-failed while a genuinely-hung one still can't pin the slot.
         if r.get("claimed_at") is None:
             r["claimed_at"] = now
-        elif (now - r["claimed_at"]) > grace_secs:  # judge never launched
-            _finish("internal_error", {"verdict_source": "data.verdict"})
+            return
+        age = now - r["claimed_at"]
+        hard_cap_secs = _cfg(plan, "subagent_hard_cap_minutes",
+                             DEFAULT_SUBAGENT_HARD_CAP_MINUTES) * 60
+        if age > hard_cap_secs:
+            r.pop("launch_advisory", None)
+            _finish("internal_error", {"verdict_source": "data.verdict"})  # hung judge, fail-closed
+        elif age > grace_secs and r.get("launch_advisory") != _SUBAGENT_ADVISORY_DISPLAY:
+            r["launch_advisory"] = _SUBAGENT_ADVISORY_DISPLAY
+            _log(run_dir, "%s/%s: NO-HEARTBEAT advisory (reasoning-gate judge past "
+                 "grace; NOT terminal, FR-72)" % (name, _step_name(m)))
         return
     if has_any and mtime is not None:
         if (now - mtime) > stall_secs and not suppress_stall:
@@ -1999,6 +2090,8 @@ def _dispatch_judge(run_dir, name, r, entry, now, plan) -> dict:
     prompt = _resolve_template(_apply_vars(judge_prompt, vmap), values)
     r["state"] = "claimed"
     r["claimed_at"] = now
+    # FR-72 Layer B: emit STARTING on the judge subagent's behalf (its own gate hb).
+    _emit_subagent_starting(run_dir, name, values["TASK_ID"], hb=_judge_hb(run_dir, name, m))
     _log(run_dir, "%s: dispatched %s reasoning-gate judge (claimed)"
          % (name, _step_name(m)))
     return {"run": name, "step": "%s-gate" % _step_name(m),
@@ -2161,6 +2254,7 @@ def _advance_multistep(run_dir, name, r, entry, now, stall_secs, grace_secs,
     has_any, last_status, _activity, mtime = _hb_observe(hb)
     if has_any:
         r["last_hb_status"] = last_status
+        r.pop("launch_advisory", None)        # FR-72: any beat clears the advisory
     bad = _count_malformed(hb)
     if bad:
         _log(run_dir, "%s/%s: WARN %d malformed heartbeat line(s) skipped"
@@ -2206,7 +2300,29 @@ def _advance_multistep(run_dir, name, r, entry, now, stall_secs, grace_secs,
         claimed_at = r.get("claimed_at")
         if claimed_at is None:
             r["claimed_at"] = now
-        elif (now - claimed_at) > grace_secs:
+            return
+        age = now - claimed_at
+        # FR-72: an agent (subagent) STEP is owned by the orchestrator, not the
+        # engine -- same ownership fork as the single-prompt path. Past grace it
+        # is a NON-terminal NO-HEARTBEAT advisory (slot held), reclaimed terminal
+        # only past the long hard cap. A shell-dispatch step keeps grace-terminal.
+        if _dispatch_mode_of(step) == "subagent":
+            hard_cap_secs = _cfg(plan, "subagent_hard_cap_minutes",
+                                 DEFAULT_SUBAGENT_HARD_CAP_MINUTES) * 60
+            if age > hard_cap_secs:
+                _reap_step_synth(run_dir, name, m, "FAILED", _SUBAGENT_HARD_CAP_HINT)
+                r["state"] = "auth_or_launch_failed"
+                r.pop("launch_advisory", None)
+                _write_entry_result(run_dir, name, r, "FAILED",
+                                    "%s subagent hard cap exceeded" % _step_name(m))
+                _log(run_dir, "%s: AUTH_OR_LAUNCH_FAILED at %s (subagent hard cap)"
+                     % (name, _step_name(m)))
+            elif age > grace_secs and r.get("launch_advisory") != _SUBAGENT_ADVISORY_DISPLAY:
+                r["launch_advisory"] = _SUBAGENT_ADVISORY_DISPLAY
+                _log(run_dir, "%s/%s: NO-HEARTBEAT advisory (subagent step past "
+                     "grace; NOT terminal, FR-72)" % (name, _step_name(m)))
+            return
+        if age > grace_secs:                  # shell step: engine owns it
             _reap_step_synth(run_dir, name, m, "FAILED", _LAUNCH_FAIL_HINT)
             r["state"] = "auth_or_launch_failed"
             _write_entry_result(run_dir, name, r, "FAILED",
@@ -2345,6 +2461,8 @@ def _dispatch_step(run_dir, name, r, entry, now, plan) -> dict:
                 "prompt_file": str(prompt_file), "heartbeat_path": values["HEARTBEAT_PATH"],
                 "run_dir": values["RUN_DIR"], "target_repo": values["TARGET_REPO"],
                 "auth_check": step.get("auth_check")}
+    # FR-72 Layer B: emit STARTING on the subagent step's behalf (its own step hb).
+    _emit_subagent_starting(run_dir, name, r["task_id"], hb=_step_hb(run_dir, name, m))
     _log(run_dir, "%s: dispatched %s (claimed, subagent)" % (name, _step_name(m)))
     return {"run": name, "step": _step_name(m), "task_id": r["task_id"],
             "dispatch_mode": "subagent", "worker_prompt": prompt}
@@ -2441,6 +2559,9 @@ def _dispatch(run_dir, runs, entries, pool_size, now, plan=None) -> list[dict]:
                 "auth_check": entry.get("auth_check"),
             })
         else:
+            # FR-72 Layer B: emit STARTING on the subagent's behalf at hand-off
+            # so completion/liveness never hinges on the worker self-heartbeating.
+            _emit_subagent_starting(run_dir, name, r["task_id"])
             out.append({
                 "run": name, "task_id": r["task_id"],
                 "dispatch_mode": "subagent",
@@ -2473,6 +2594,32 @@ def _synthesize_failure(run_dir, r, terminal_state, reason):
                 p.unlink()
             except OSError:
                 pass
+
+
+def _emit_subagent_starting(run_dir: Path, run_name: str, task_id, hb=None) -> None:
+    """FR-72 Layer B (the FR-40 analogue): when the engine hands a SUBAGENT entry
+    to the orchestrator it writes a ``STARTING`` heartbeat on the worker's behalf,
+    so the run advances claimed->running on the next tick and its escape from
+    launch grace never depends on the subagent's own first heartbeat (exactly the
+    gap the 2026-06-17 incident hit -- an ad-hoc gather prompt that never
+    self-heartbeat). The matching terminal (COMPLETED/FAILED) on the subagent's
+    RETURN is the orchestrator/skill-side contract (TOOLKIT.md), since the engine
+    cannot itself observe a subagent return -- mirroring how ``heartbeat.py wrap``
+    is the shell-side home for the same guarantee. ``hb`` overrides the watched
+    heartbeat file (a pipeline step's / a reasoning-gate judge's own sub-run hb).
+
+    Best-effort: a heartbeat-write failure never crashes dispatch (the advisory +
+    hard-cap paths in _advance still backstop liveness)."""
+    hb = hb if hb is not None else _heartbeat_path(run_dir, run_name)
+    line = {"ts": _utc_iso(), "task_id": str(task_id or ""),
+            "schema_version": SCHEMA_VERSION,
+            "label": "dispatched to subagent", "status": "STARTING"}
+    try:
+        hb.parent.mkdir(parents=True, exist_ok=True)
+        with hb.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(line, separators=(",", ":")) + "\n")
+    except OSError:
+        pass            # best-effort; advisory/hard-cap backstop liveness
 
 
 # --- presentation -----------------------------------------------------------
@@ -2561,6 +2708,7 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
     ]
     any_launch_fail = False
     any_live = False
+    any_advisory = False
     now = _now()
     # instr-051: reconcile the persisted STATE against the live heartbeat so a
     # finished/started worker isn't shown stale between ticks. The freshness
@@ -2589,6 +2737,12 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
         disp_label = _STATE_DISPLAY.get(disp, disp)
         if live:
             disp_label = disp_label + _LIVE_MARKER     # heartbeat ahead of tick
+        # FR-72: a claimed subagent past launch grace with no heartbeat shows the
+        # NON-terminal NO-HEARTBEAT advisory (on-disk state stays `claimed`). Only
+        # when not live -- a fresh heartbeat (live) wins and clears the advisory.
+        if st == "claimed" and r.get("launch_advisory") and not live:
+            disp_label = r["launch_advisory"]
+            any_advisory = True
         # LAST-HB: the LIVE heartbeat status when present (it leads the tick),
         # else the last-tick-persisted observation.
         last_hb = hb_status or r.get("last_hb_status") or "-"
@@ -2622,6 +2776,9 @@ def _format_table(run_dir, status, plan, terminal: bool) -> str:
         # FR-21b: the diagnostic hint travels with the table, not just the
         # result record — LAUNCH-FAIL covers more than auth.
         rows.append("LAUNCH-FAIL: " + _LAUNCH_FAIL_HINT + ".")
+    if any_advisory and not terminal:
+        # FR-72: NO-HEARTBEAT is advisory, NOT a failure -- say so in the table.
+        rows.append("NO-HEARTBEAT: " + _SUBAGENT_ADVISORY_HINT + ".")
     if status.get("paused") and not terminal:
         # FR-36: PAUSED banner while paused (no new dispatch; in-flight workers
         # keep running). Drop RESUME or remove PAUSE to resume.
@@ -2747,7 +2904,8 @@ _MODE_STEP_KEYS = {
 # Top-level optional knobs that, IF present, must be integers >= 1 (mirrors
 # plan.schema.json minimums; defaults live in the engine if omitted).
 _PLAN_INT_KEYS = ("tick_interval_minutes", "pool_size", "stall_threshold_minutes",
-                  "launch_grace_minutes", "idle_tick_multiplier")
+                  "launch_grace_minutes", "idle_tick_multiplier",
+                  "subagent_hard_cap_minutes")   # FR-72 (>> launch grace; default 720)
 # The closed set of plan-root keys (additionalProperties:false, == plan.schema.json).
 _PLAN_KEYS = frozenset(_PLAN_INT_KEYS + (
     "schema_version", "description", "_comment", "keepalive_seconds", "vars",
@@ -3247,6 +3405,16 @@ def check_plan(plan_path, run_auth: bool = False) -> list:
             prob = _ka_problem("jobs[%d]" % i, e["keepalive_seconds"], eg)
             if prob:
                 problems.append(prob)
+    # FR-72: the subagent hard cap must be > launch grace -- otherwise it would
+    # fire before (or at) the advisory window, inverting the design (a quiet
+    # subagent reclaimed terminal at the cap before it ever becomes advisory).
+    if "subagent_hard_cap_minutes" in plan and _is_pos_int(plan["subagent_hard_cap_minutes"]):
+        if isinstance(plan_grace, int) and plan["subagent_hard_cap_minutes"] <= plan_grace:
+            problems.append(
+                "plan.subagent_hard_cap_minutes: %d must be > launch_grace_minutes "
+                "%d -- the hard cap reclaims a hung subagent only AFTER the "
+                "NO-HEARTBEAT advisory window (FR-72)"
+                % (plan["subagent_hard_cap_minutes"], plan_grace))
     return problems
 
 
