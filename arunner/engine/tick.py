@@ -2761,6 +2761,16 @@ def _synthesize_done_skip(run_dir, r) -> None:
     it leaves the queue and never claims a slot. ``done_skipped`` is a display
     marker only (SKIPPED:done); doneness still flows through the terminal status."""
     _synthesize_failure(run_dir, r, "completed", _DONE_SKIP_HINT)
+    # Disk-truth hygiene: a never-claimed job's file still sits in queue/ (it was
+    # never moved to claimed/). Remove it so a done-skipped run leaves queue/ AND
+    # claimed/ empty with only the result sentinel -- exactly like a reaped
+    # `completed` job (a leftover queue/ file is otherwise inert but untidy).
+    qf = run_dir / "queue" / (r["job_id"] + ".json")
+    if qf.exists():
+        try:
+            qf.unlink()
+        except OSError:
+            pass
     r["state"] = "completed"
     r["started"] = True
     r["done_skipped"] = True

@@ -520,6 +520,10 @@ class DoneCheckResume(_Base):
         self.assertEqual(rec["terminal_status"], "COMPLETED")
         self.assertTrue(rec.get("synthesized"))
         self.assertIn("done_check", rec.get("summary", ""))
+        # disk-truth: a skipped job leaves queue/ AND claimed/ empty (only the
+        # result sentinel), exactly like a reaped completed job.
+        self.assertFalse((rd / "queue" / "job-00001.json").exists())
+        self.assertFalse((rd / "claimed" / "job-00001.json").exists())
 
     def test_partial_target_not_satisfied_is_redone_not_skipped(self):
         # A target whose done_check is NOT satisfied is dispatched (redone), never
