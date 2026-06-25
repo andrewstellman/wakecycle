@@ -620,6 +620,12 @@ _DISPATCH = {"run": cmd_run, "status": cmd_status, "stop": cmd_stop,
 
 def main(argv=None) -> int:
     args = _build_parser().parse_args(argv)
+    # FR-34 startup banner: the running version is always visible at the console
+    # entry point too (the engine tick/ticker already banner the same way). To
+    # stderr so stdout stays clean for the status table / staged-job lines, and
+    # read from the single source via __version__ -- never a literal. `--version`
+    # / `-h` exit inside parse_args above, so they never double-print it.
+    print("arunner %s" % __version__, file=sys.stderr)
     if not args.verb:
         _build_parser().print_help(sys.stderr)
         return 64

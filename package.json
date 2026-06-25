@@ -1,6 +1,6 @@
 {
   "name": "arunner",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "description": "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights.",
   "bin": { "arunner": "npm-bin/arunner.js" },
   "keywords": ["agent", "orchestration", "ai", "harness", "batch", "claude"],

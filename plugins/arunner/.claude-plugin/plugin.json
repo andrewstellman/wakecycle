@@ -1,7 +1,7 @@
 {
   "name": "arunner",
   "description": "Orchestrate AI coding agents (or any job that appends JSON lines to a file) across many repos from one agent session. The harness skill drives a disk-backed state machine via in-session ScheduleWakeup polling: each tick dispatches worker subagents (Task tool) or detached shell workers, tails their heartbeats, advances the state machine, prints a status table, and reschedules - until every job reaches a terminal state or you write a STOP file. No external scheduler, no long-running daemon.",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "author": { "name": "Andrew Stellman", "email": "andrew@stellman.com" },
   "homepage": "https://github.com/andrewstellman/arunner",
   "license": "Apache-2.0"

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 "use strict";
-// arunner npm launcher (v0.1.0).
+// arunner npm launcher (version tracks the Python package -- FR-34 single source).
 //
 // The arunner ENGINE is a Python package (`arunner` on PyPI) — pipx/pip is the
 // PRIMARY install channel. This npm package is only a SECONDARY convenience: a

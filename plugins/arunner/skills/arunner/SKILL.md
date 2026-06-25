@@ -1,7 +1,7 @@
 ---
 name: arunner
 description: Orchestrate AI coding agents (or any job that appends JSON lines to a file) across many repos or branches from one agent session. Drives a disk-backed state machine one idempotent tick at a time - each tick the tick script reads workers' heartbeats, advances the state machine, and lists which workers to dispatch; the orchestrator launches them, prints the status table, and schedules the next tick (via ScheduleWakeup at cadence rung 1, or the foreground ticker at lower rungs). Dispatch is in-session subagents (rung 1) or detached shell workers. Runs until every job is terminal or a STOP file appears. Use when asked to run a batch of agent jobs, a benchmark plan, or multi-repo reviews.
-version: 0.1.0
+version: 1.1.0
 license: Apache-2.0
 ---
 

@@ -4,7 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "arunner"
-version = "0.1.0"
+# FR-34 single source: the version is NOT written here. It is DERIVED from
+# arunner/__init__.py:__version__ (the one canonical location) via the
+# [tool.setuptools.dynamic] table below, so a bump touches exactly one file and
+# wheel/sdist metadata can never drift from the package. Pinned by
+# tests/test_version_single_source.py.
+dynamic = ["version"]
 description = "A batch orchestrator for AI coding agents that runs inside your existing agent session - no server, no daemon, no admin rights."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -42,3 +47,9 @@ arunner-heartbeat = "arunner.engine.heartbeat:main"
 # its only Textual import lives in arunner/tui/app.py, imported lazily by
 # `cli.cmd_tui` -- the engine path (arunner.engine, monitor) imports none of it.
 packages = ["arunner", "arunner.engine", "arunner.tui"]
+
+[tool.setuptools.dynamic]
+# FR-34: packaging metadata reads the single canonical source. setuptools imports
+# nothing extra to read an attr literal -- it parses arunner/__init__.py for the
+# assignment -- so this stays NFR-3-clean (no build-time runtime dependency).
+version = { attr = "arunner.__version__" }

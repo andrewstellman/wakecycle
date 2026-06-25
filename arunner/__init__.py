@@ -6,4 +6,4 @@ worker); the lifecycle CLI is ``arunner.cli`` (console script ``arunner``). The
 Claude plugin lives in ``plugins/``. ``__version__`` is the single canonical
 version every surface mirrors (FR-34).
 """
-__version__ = "0.1.0"
+__version__ = "1.1.0"
