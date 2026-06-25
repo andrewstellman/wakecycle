@@ -760,6 +760,26 @@ class RetryPolicy(_Base):
         rec = json.loads((rd / "results" / "result-00001.json").read_text())
         self.assertEqual(rec["terminal_status"], "ABANDONED")
 
+    def test_auth_or_launch_failed_is_not_retried(self):
+        # Transient-vs-fatal default (Council C-F1): a FATAL terminal
+        # (auth_or_launch_failed) is NEVER retried, even with max_attempts>1 — it
+        # won't succeed on a blind re-run, so it never burns attempts. A shell job
+        # that emits no heartbeat past launch_grace is the launch-failure case.
+        # MUTATION: wire _maybe_retry into the auth/launch-fail path -> the job is
+        # requeued (state leaves auth_or_launch_failed) -> this test FAILs. Bite.
+        repo = self._repo("r-1")
+        job = {"id": "t-1", "repo": str(repo), "mode": "shell",
+               "command": ["true"], "max_attempts": 3}
+        rd = self._init(self._plan([job], pool_size=1, launch_grace_minutes=10))
+        os.environ["ARUNNER_NOW"] = str(M)
+        T.tick(rd)                                   # claimed (shell), no heartbeat
+        self.assertEqual(_status(rd)["runs"]["run-01"]["attempts"], 1)
+        os.environ["ARUNNER_NOW"] = str(M + 11 * MIN)  # past the 10-min launch grace
+        T.tick(rd)
+        s = _status(rd)["runs"]["run-01"]
+        self.assertEqual(s["state"], "auth_or_launch_failed")  # fatal — terminal
+        self.assertEqual(s["attempts"], 1)           # NOT retried (no attempt burned)
+
     def test_backoff_delays_redispatch(self):
         # A requeued attempt is NOT dispatch-eligible until retry_backoff_seconds
         # elapse (via ARUNNER_NOW).
